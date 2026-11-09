@@ -16,7 +16,7 @@ work on the code.
 | `crates/protocol`, `crates/endpoint` | JSON-lines messages between the server and the DLLs, and the authenticated local endpoint they use. |
 | `crates/rtti` | Finds vtables in a PE image by RTTI name, and by string anchors where RTTI is missing (`src/anchors/rules.rs` and `rules/<capability>.rs`). |
 | `crates/ocr` | Reads on-screen text by matching the game's own pixel fonts. |
-| `mc/bridge`, `mc/gametest` | Behavior packs (Regolith projects) whose `re_mcp:*` commands answer the server with JSON. |
+| `mc/bridge`, `mc/gametest` | Behavior packs (rgl projects) whose `re_mcp:*` commands answer the server with JSON. |
 | `docs/tools.md` | Tool reference, generated from the tool definitions. |
 | `.agents/skills/` | Procedures for coding agents: `anchor-rules` and `update-game-version`. |
 

@@ -199,7 +199,9 @@ MCP client configuration:
 
 ## Packs
 
-`mc/bridge/` and `mc/gametest/` are [Regolith](https://regolith-docs.readthedocs.io) projects.
+`mc/bridge/` and `mc/gametest/` are [rgl](https://github.com/ink0rr/rgl) projects. rgl is a fast
+Bedrock add-on compiler that reads Regolith's `config.json` format. Install it from its releases,
+and [Bun](https://bun.sh) for the scripts.
 
 ```bash
 cd mc/bridge && bun install && rgl run      # exports "bedrock-mcp Bridge"
@@ -303,8 +305,8 @@ The `docs` tools need no running game.
 - `pack_validate`, `pack_info` and `pack_fix_versions` run Mojang's
   [Minecraft Creator Tools](https://github.com/Mojang/minecraft-creator-tools). They need Node 22
   or later. `pack_fix_versions` changes nothing unless `dry_run` is false.
-- `schema_list` and `schema_get` read `@minecraft/bedrock-schemas` for the installed game
-  version, cached after the first download.
+- `schema_list` and `schema_get` read the JSON schemas of a pinned
+  [rockide/schemas](https://github.com/rockide/schemas) release, downloaded once with curl.
 - `molang_eval` evaluates an expression with [MolangJS](https://github.com/JannisX11/MolangJS). It
   does not validate: unknown names count as 0 and malformed syntax gives a number. The reply lists
   the names you did not supply. The game reports real Molang errors in the content log.
@@ -563,8 +565,8 @@ new game version. Report security problems privately, as [SECURITY.md](SECURITY.
 - [MolangJS](https://github.com/JannisX11/MolangJS) by JannisX11 (MIT): runs `molang_eval`.
 - [Minecraft Creator Tools](https://github.com/Mojang/minecraft-creator-tools) by Mojang: runs
   `pack_validate`, `pack_info` and `pack_fix_versions`.
-- [`@minecraft/bedrock-schemas`](https://github.com/Mojang/bedrock-schemas) by Mojang (MIT): the
-  schemas for `schema_list` and `schema_get`.
+- [rockide/schemas](https://github.com/rockide/schemas) by rockide: the schemas for `schema_list`
+  and `schema_get`.
 
 The `docs` tools download MolangJS, Creator Tools and the schemas into the server's cache on first
 use; the releases do not bundle them.
