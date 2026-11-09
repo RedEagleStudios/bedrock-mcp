@@ -1,4 +1,4 @@
-# Bedrock MCP for Minecraft by Red Eagle Studios
+# Bedrock MCP for Minecraft
 
 `bedrock-mcp` is an [MCP](https://modelcontextprotocol.io) server for agentic AI add-on development
 and testing on Minecraft Bedrock. An agent launches the game, plays it with real keyboard and mouse
