@@ -1324,6 +1324,14 @@ impl super::Driver for GameTestDriver {
         });
         self.first(game, &sim, &Action::StopMoving, next)
     }
+
+    fn fight(&self, _game: &mut dyn Game, _args: &super::fight::Fight) -> Result<Outcome> {
+        bail!(
+            "fight plays the connected player (actor self) only; {} is a simulated player, so \
+             use attack steps in action_sequence for it.",
+            self.name
+        )
+    }
 }
 
 #[cfg(test)]

@@ -32,11 +32,25 @@ pub trait Agent {
     }
 
     fn status(&mut self) -> Result<Status> {
-        match self.request(&Request::Status)? {
-            Reply::Status(status) => Ok(status),
-            Reply::Error { message } => Err(Error::msg(format!("Developer agent: {message}"))),
-            Reply::Ok => Err(Error::msg("Developer agent answered status without one.")),
-        }
+        expect_status(self.request(&Request::Status)?, "status")
+    }
+
+    /// Lock the player's real input out of the game, or let it in again; the status after.
+    fn lock_input(&mut self, locked: bool) -> Result<Status> {
+        expect_status(
+            self.request(&Request::InputLock { locked })?,
+            "the input lock",
+        )
+    }
+}
+
+fn expect_status(reply: Reply, what: &str) -> Result<Status> {
+    match reply {
+        Reply::Status(status) => Ok(status),
+        Reply::Error { message } => Err(Error::msg(format!("Developer agent: {message}"))),
+        Reply::Ok => Err(Error::msg(format!(
+            "Developer agent answered {what} without a status."
+        ))),
     }
 }
 
@@ -138,21 +152,56 @@ pub mod fake {
     use super::*;
 
     /// Records requests and answers status with a frame counter that advances per poll.
+    #[derive(Default)]
     pub struct FakeAgent {
         pub requests: Vec<Request>,
         pub readings: u64,
         pub disconnect_after: Option<usize>,
         pub replies: VecDeque<Reply>,
+        /// The input lock, as [`Request::InputLock`] sets it.
+        pub locked: bool,
+        /// F9 take-overs; [`FakeAgent::take_over`] adds one.
+        pub takeovers: u64,
     }
 
     impl FakeAgent {
         pub fn new() -> Self {
-            Self {
-                requests: Vec::new(),
-                readings: 0,
-                disconnect_after: None,
-                replies: VecDeque::new(),
+            Self::default()
+        }
+
+        fn current(&self) -> Status {
+            Status {
+                protocol: PROTOCOL_VERSION,
+                pid: 1,
+                width: 1920,
+                height: 1080,
+                foreground: true,
+                game_active: true,
+                mouse_readings: self.readings,
+                gameinput_versions: vec![],
+                pointer: [0, 0],
+                pointer_override: false,
+                input_locked: self.locked,
+                takeovers: self.takeovers,
             }
+        }
+
+        /// The player presses F9: a lock ends and counts a take-over.
+        pub fn take_over(&mut self) {
+            if std::mem::take(&mut self.locked) {
+                self.takeovers += 1;
+            }
+        }
+
+        /// The input lock requests, in order.
+        pub fn locks(&self) -> Vec<bool> {
+            self.requests
+                .iter()
+                .filter_map(|request| match request {
+                    Request::InputLock { locked } => Some(*locked),
+                    _ => None,
+                })
+                .collect()
         }
 
         /// Requests other than status polls.
@@ -179,18 +228,11 @@ pub mod fake {
             Ok(match request {
                 Request::Status => {
                     self.readings += 1;
-                    Reply::Status(Status {
-                        protocol: PROTOCOL_VERSION,
-                        pid: 1,
-                        width: 1920,
-                        height: 1080,
-                        foreground: true,
-                        game_active: true,
-                        mouse_readings: self.readings,
-                        gameinput_versions: vec![],
-                        pointer: [0, 0],
-                        pointer_override: false,
-                    })
+                    Reply::Status(self.current())
+                }
+                Request::InputLock { locked } => {
+                    self.locked = *locked;
+                    Reply::Status(self.current())
                 }
                 _ => Reply::Ok,
             })
@@ -228,17 +270,20 @@ pub mod fake {
         port
     }
 
-    /// A stable agent endpoint that accepts any token and answers status.
-    pub fn stable_endpoint() -> Endpoint {
-        let port = serve_lines(|request: Request| match request {
-            Request::Status => FakeAgent::new().request(&Request::Status).unwrap(),
-            _ => Reply::Ok,
-        });
+    /// A stable agent endpoint that accepts any token and answers as `agent` does.
+    pub fn shared_endpoint(agent: std::sync::Arc<std::sync::Mutex<FakeAgent>>) -> Endpoint {
+        let port =
+            serve_lines(move |request: Request| agent.lock().unwrap().request(&request).unwrap());
         Endpoint {
             port,
             token: "t".into(),
             pid: 1,
         }
+    }
+
+    /// A stable agent endpoint that accepts any token and answers status.
+    pub fn stable_endpoint() -> Endpoint {
+        shared_endpoint(Default::default())
     }
 }
 

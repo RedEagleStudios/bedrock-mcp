@@ -20,8 +20,12 @@ use serde_json::{Value, json};
 use super::{
     AIM_LEAD, Aim, Confirmation, Controls, Expect, Game, Hand, Movement, Outcome, Pending, Presses,
     Quantity, TICK, TICK_POLL, UseMode, beside, block_of, confirm_after, current_tick,
-    entity_point, face_named, face_point, first, horizontal, listen, native::Readback, point_of,
-    rounded,
+    entity_point, face_named, face_point,
+    fight::{Fight, Fighter},
+    first, horizontal, listen,
+    native::Readback,
+    point_of, rounded,
+    walk::{EYE_HEIGHT, Gait, Walked, Walker},
 };
 use crate::{
     bridge::{Actor, quoted},
@@ -32,8 +36,6 @@ use crate::{
     world::{World, distance, facing, number, shortest_turn},
 };
 
-/// Eye height of a standing player, to turn a querytarget eye position into feet.
-const EYE_HEIGHT: f64 = 1.62;
 /// Dropped items spawn this close to the player.
 const DROP_RADIUS: f64 = 4.0;
 const DEFAULT_ARRIVAL: f64 = 1.0;
@@ -60,20 +62,10 @@ const STEER_TOLERANCE: f64 = 15.0;
 /// up as blocked.
 const STALL_WINDOW: Duration = Duration::from_millis(700);
 const STALL_PROGRESS: f64 = 0.3;
-/// How far ahead walking looks for water or lava, in blocks.
-const LIQUID_LOOKAHEAD: f64 = 0.8;
 /// How often the driver checks its own action when it waits for it.
 const POLL: Duration = Duration::from_millis(10);
 /// The events that end a use of an item.
 const USE_ENDS: [&str; 3] = ["item_release_use", "item_complete_use", "item_stop_use"];
-
-/// Why walking toward a target stopped.
-enum Stop {
-    Arrived,
-    Timeout,
-    /// Water or lava one step ahead: its id and block coordinates.
-    Liquid(String, [i64; 3]),
-}
 
 #[derive(Clone)]
 pub struct InputDriver {
@@ -126,8 +118,8 @@ impl Pending for InputPending {
 /// Whether the events found so far confirm an input.
 type Enough = Box<dyn Fn(&[HubEvent]) -> bool>;
 
-/// Why walking stopped, with the last position and goal.
-type Steered = (Stop, [f64; 3], [f64; 3]);
+/// How a walk ended (`None`: the time ran out), with the last position and the goal.
+type Travelled = (Option<Walked>, [f64; 3], [f64; 3]);
 
 /// What confirms an input.
 struct Confirm {
@@ -816,8 +808,8 @@ impl InputDriver {
                 current.notes.push(format!(
                     "Walking toward entity {id} stopped closing the gap ({gap:.1} blocks left, \
                      less than {STALL_PROGRESS} blocks closer in {} ms), so it was not {}: {what}. \
-                     The input driver walks straight and does not find paths; clear the way or \
-                     walk around first with movement_set.",
+                     approach walks straight and does not find paths; walk around first with \
+                     movement_set, which does, or use fight.",
                     STALL_WINDOW.as_millis(),
                     click.verb
                 ));
@@ -861,8 +853,8 @@ impl InputDriver {
                     ));
                     current.notes.push(format!(
                         "Walked toward entity {id} for {} ms, but it was still {distance:.1} \
-                         blocks away, so it was not {}. The input driver walks straight at it \
-                         and does not find paths; give more approach_ms or clear the way.",
+                         blocks away, so it was not {}. approach walks straight at it and does \
+                         not find paths; give more approach_ms, or walk there with movement_set.",
                         started.elapsed().as_millis(),
                         click.verb
                     ));
@@ -898,73 +890,8 @@ impl InputDriver {
         }
     }
 
-    /// The water or lava block one step ahead of `at` along `yaw`, at the feet or (over air)
-    /// just below them, with its block coordinates.
-    fn liquid_ahead(scene: &Scene, at: [f64; 3], yaw: f64) -> Result<Option<(String, [i64; 3])>> {
-        let radians = yaw.to_radians();
-        let (x, z) = (
-            (at[0] - radians.sin() * LIQUID_LOOKAHEAD).floor() as i64,
-            (at[2] + radians.cos() * LIQUID_LOOKAHEAD).floor() as i64,
-        );
-        let feet = at[1].floor() as i64;
-        for y in [feet, feet - 1] {
-            let block = scene
-                .world
-                .bridge_command(&format!("re_mcp:block {x} {y} {z}"))?;
-            let id = block["id"].as_str().unwrap_or_default();
-            if id.ends_with("water") || id.ends_with("lava") {
-                return Ok(Some((id.to_owned(), [x, y, z])));
-            }
-            if block["air"] != Value::Bool(true) {
-                return Ok(None);
-            }
-        }
-        Ok(None)
-    }
-
-    /// One turn of walking toward `to`: why it stops, with the last position and goal, or
-    /// `None` after turning toward the goal and pressing forward.
-    fn steer(
-        game: &mut dyn Game,
-        scene: &Scene,
-        movement: &Movement,
-        to: &super::Destination,
-        deadline: Instant,
-        walking: &mut bool,
-    ) -> Result<Option<Steered>> {
-        let radius = movement.arrival_radius.unwrap_or(DEFAULT_ARRIVAL);
-        // Only with the pack's block reads; a player already in a liquid may walk out of it.
-        let avoid = scene.bridge && movement.avoid_water.unwrap_or(true);
-        let goal = Self::goal(scene, to)?;
-        let at = Self::position(scene)?;
-        if horizontal(at, goal) <= radius {
-            return Ok(Some((Stop::Arrived, at, goal)));
-        }
-        if Instant::now() >= deadline {
-            return Ok(Some((Stop::Timeout, at, goal)));
-        }
-        let (yaw, _) = facing(at, goal);
-        if avoid && let Some((id, block)) = Self::liquid_ahead(scene, at, yaw)? {
-            let state = scene.world.bridge_command("re_mcp:state")?;
-            if state["flags"]["inWater"] != Value::Bool(true) {
-                return Ok(Some((Stop::Liquid(id, block), at, goal)));
-            }
-        }
-        scene
-            .world
-            .look_as(&Actor::Me, yaw, 0.0, false, 0, &mut || Ok(()))?;
-        if !*walking {
-            game.input(InputRequest {
-                sprint: movement.sprint,
-                jump: movement.jump,
-                ..forward(true)
-            })?;
-            *walking = true;
-        }
-        Ok(None)
-    }
-
-    /// Walk to `to`, turning toward it every [`STEER_INTERVAL`].
+    /// Walk to `to` along a path, one [`Walker`] step each tick, until arrived, blocked or
+    /// out of time.
     fn travel(
         &self,
         game: &mut dyn Game,
@@ -973,8 +900,15 @@ impl InputDriver {
         to: &super::Destination,
     ) -> Result<Outcome> {
         let mut outcome = self.outcome();
-        let from = match Self::position(&scene) {
-            Ok(from) => from,
+        let gait = Gait {
+            radius: movement.arrival_radius.unwrap_or(DEFAULT_ARRIVAL),
+            water: !movement.avoid_water.unwrap_or(true),
+            sprint: movement.sprint == Some(true),
+            jump_held: movement.jump == Some(true),
+        };
+        let mut walker = Walker::new(scene.world.clone(), scene.bridge, gait);
+        let from = match walker.reader.read(game) {
+            Ok(pose) => pose.feet,
             Err(error) if !scene.bridge => {
                 outcome.notes.push(cannot_aim(&error));
                 return Ok(outcome);
@@ -984,42 +918,49 @@ impl InputDriver {
         if let Some(tick) = self.tick {
             outcome.evidence["acted_tick"] = tick.into();
         }
-        let movement = Movement {
-            to: Some(to.clone()),
-            sprint: movement.sprint,
-            jump: movement.jump,
-            arrival_radius: movement.arrival_radius,
-            timeout_ms: movement.timeout_ms,
-            avoid_water: movement.avoid_water,
-            ..Movement::default()
-        };
+        if gait.jump_held {
+            game.input(InputRequest {
+                jump: Some(true),
+                ..InputRequest::default()
+            })?;
+        }
         let to = to.clone();
         let started = Instant::now();
         let deadline =
             started + Duration::from_millis(movement.timeout_ms.unwrap_or(DEFAULT_TRAVEL_MS));
-        let mut walking = false;
         let mut next = started;
         let mut outcome = Some(outcome);
         let step: Step = Box::new(move |game, holds| {
             if Instant::now() < next {
                 return Ok(None);
             }
-            next = Instant::now() + STEER_INTERVAL;
-            let steered = Self::steer(game, &scene, &movement, &to, deadline, &mut walking);
-            if matches!(steered, Ok(None)) {
+            next = Instant::now() + TICK;
+            let mut walked = || -> Result<Option<Travelled>> {
+                let goal = Self::goal(&scene, &to)?;
+                let pose = walker.reader.read(game)?;
+                if Instant::now() >= deadline && horizontal(pose.feet, goal) > gait.radius {
+                    return Ok(Some((None, pose.feet, goal)));
+                }
+                let end = walker.step(game, pose, goal)?;
+                Ok(end.map(|end| (Some(end), pose.feet, goal)))
+            };
+            let walked = walked();
+            if matches!(walked, Ok(None)) {
                 return Ok(None);
             }
-            if walking {
+            walker.release(game)?;
+            if gait.jump_held {
                 game.input(InputRequest {
-                    sprint: movement.sprint.map(|_| false),
-                    jump: movement.jump.map(|_| false),
-                    ..forward(false)
+                    jump: Some(false),
+                    ..InputRequest::default()
                 })?;
             }
             *holds = Controls::NONE;
             let mut outcome = outcome.take().expect("a finished action is not polled");
-            let (stop, at, goal) = match steered {
-                Ok(Some(steered)) => steered,
+            outcome.notes.extend(walker.take_notes());
+            outcome.evidence["path"] = walker.evidence();
+            let (end, at, goal) = match walked {
+                Ok(Some(walked)) => walked,
                 Ok(None) => unreachable!("handled above"),
                 Err(error) if !scene.bridge => {
                     outcome.notes.push(cannot_aim(&error));
@@ -1028,22 +969,27 @@ impl InputDriver {
                 Err(error) => return Err(error),
             };
             let gap = horizontal(at, goal);
-            outcome.confirmed = matches!(stop, Stop::Arrived);
-            outcome.source = if scene.bridge { "bridge" } else { "command" };
+            outcome.confirmed = matches!(end, Some(Walked::Arrived));
+            outcome.source = walker.reader.source();
             outcome.evidence["from"] = json!(from);
             outcome.evidence["at"] = json!(at);
             outcome.evidence["target"] = json!(goal);
             outcome.evidence["distance"] = rounded(gap).into();
             outcome.evidence["elapsed_ms"] = (started.elapsed().as_millis() as u64).into();
-            match stop {
-                Stop::Arrived => {}
-                Stop::Timeout => outcome.notes.push(format!(
-                    "Stopped {} blocks from the target when the time ran out. The input driver \
-                     walks straight at the target and does not find paths, so something may be \
-                     in the way.",
+            match end {
+                Some(Walked::Arrived) => {}
+                None => outcome.notes.push(format!(
+                    "Stopped {} blocks from the target when the time ran out.",
                     rounded(gap)
                 )),
-                Stop::Liquid(id, block) => {
+                Some(Walked::Blocked(why)) => {
+                    outcome.reason = Some(("blocked", why.clone()));
+                    outcome.notes.push(format!(
+                        "Stopped {} blocks from the target: {why}.",
+                        rounded(gap)
+                    ));
+                }
+                Some(Walked::Liquid(id, block)) => {
                     outcome.evidence["liquid"] = json!({ "id": id, "block": block });
                     outcome.notes.push(format!(
                         "Stopped {} blocks from the target at the edge of {id} at {block:?}. Walk \
@@ -1055,6 +1001,23 @@ impl InputDriver {
             Ok(Some(outcome))
         });
         self.settle(game, Controls::VIEW | Controls::MOVE, step)
+    }
+
+    /// Fight the nearest matching mobs, one [`Fighter`] tick at a time.
+    fn fight_with(&self, game: &mut dyn Game, args: &Fight) -> Result<Outcome> {
+        let mut fighter = Fighter::start(game, args)?;
+        let step: Step = Box::new(move |game, holds| {
+            let done = fighter.poll(game)?;
+            if done.is_some() {
+                *holds = Controls::NONE;
+            }
+            Ok(done)
+        });
+        self.settle(
+            game,
+            Controls::VIEW | Controls::MOVE | Controls::ATTACK,
+            step,
+        )
     }
 
     /// Press the manual movement keys, for `duration_ms` or until released later.
@@ -1793,6 +1756,10 @@ impl super::Driver for InputDriver {
             Ok(())
         });
         self.settle(game, Controls::NONE, awaiting(outcome, watch, then))
+    }
+
+    fn fight(&self, game: &mut dyn Game, args: &Fight) -> Result<Outcome> {
+        self.fight_with(game, args)
     }
 
     fn stop(&self, game: &mut dyn Game) -> Result<Outcome> {

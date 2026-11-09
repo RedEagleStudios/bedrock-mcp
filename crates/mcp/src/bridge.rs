@@ -253,8 +253,20 @@ impl World {
         Ok(())
     }
 
+    /// Run a bridge command. A command the game does not know, while the cache says the
+    /// bridge answers, may mean the world changed under the same connection: ask again, and
+    /// give the install hint when the pack is gone.
     pub fn bridge_command(&self, command: &str) -> Result<Value> {
-        parse_reply(command, &self.raw(command)?)
+        let body = self.raw(command)?;
+        let rejected = body["statusCode"].as_i64().unwrap_or(0) != 0
+            && unknown_command(body["statusMessage"].as_str().unwrap_or_default());
+        if rejected {
+            self.forget_bridge();
+            if !self.bridge(true)? {
+                bail!("{INSTALL_HINT}");
+            }
+        }
+        parse_reply(command, &body)
     }
 
     /// Run a writing bridge command and wait until its queued job ran on a game tick; the
@@ -576,5 +588,19 @@ mod tests {
         // The cached absence is reused by look, which falls back to /tp (here rejected).
         assert!(world.look(1.0, 2.0, true, 0, &mut || Ok(())).is_err());
         assert_eq!(*seen.lock().unwrap(), ["re_mcp:ping", "tp @s ~ ~ ~ ~1 ~2"]);
+    }
+
+    #[test]
+    fn a_world_without_the_pack_on_the_same_connection_is_noticed() {
+        // The bridge answered in the previous world; this one rejects every re_mcp command.
+        let (world, seen) = game(unknown);
+        world.cache_bridge(world.socket().connections(), true);
+        let error = world
+            .bridge_command("re_mcp:state")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not active in this world"), "{error}");
+        assert!(!world.bridge(false).unwrap());
+        assert_eq!(*seen.lock().unwrap(), ["re_mcp:state", "re_mcp:ping"]);
     }
 }

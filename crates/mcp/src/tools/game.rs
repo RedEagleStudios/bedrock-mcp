@@ -120,8 +120,9 @@ pub fn tools() -> Vec<Tool> {
                     "- warnings are {kind, detail}; empty means a normal session. Kinds: death, disconnected, unstable_anchors_only (seen on Linux only), unstable_disabled, unstable_failed, unstable_capabilities, websocket_disconnected, screen_open, other_mods.\n",
                     "- in_world comes from the screens capability, else the WebSocket; null, with notes, when neither tells.\n",
                     "- world needs the WebSocket: with the Bridge pack, re_mcp:state (the player), re_mcp:world and nearby re_mcp:entities; without it, eye, yaw, pitch (bisected), dimension, nearby actors, time_of_day and game_time. Without the pack, in a world with the unstable layer's world_state capability, world.player adds the native player_get fields (source native), even without the WebSocket.\n",
-                    "- On generic Linux desktops the window size is at scale 1 and workspace is null.\n\n",
-                    "Returns {running, pid, crash_debugger, agent, window, in_world: {value, source, notes}, content_log_errors, attention, warnings, websocket, world, camera, recording, timeline, held, unstable}. ",
+                    "- On generic Linux desktops the window size is at scale 1 and workspace is null.\n",
+                    "- input_lock is {enabled, locked, taken_over, banner, note}: while the server plays, the player's real keyboard and mouse are locked out of the game; taken_over is true once the player pressed F9 since the last lock started. BEDROCK_MCP_INPUT_LOCK=0 turns it off.\n\n",
+                    "Returns {running, pid, crash_debugger, agent, window, in_world: {value, source, notes}, content_log_errors, attention, warnings, websocket, world, camera, recording, timeline, held, input_lock, unstable}. ",
                     "window.desktop is hyprland, generic or windows; unstable is null without the layer, else {capabilities, screens (scene stacks, bottom first), camera}."
                 ),
                 "inputSchema": object(json!({}), &[])

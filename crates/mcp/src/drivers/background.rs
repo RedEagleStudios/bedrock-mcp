@@ -28,6 +28,8 @@ use crate::{
 
 /// How many ended runs `sequence_status` still knows.
 const KEEP_ENDED: usize = 8;
+const TAKE_OVER_NOTE: &str = "The player pressed F9 and took over: the server stopped the run \
+                              and leaves their input unlocked until the next tool call.";
 /// The longest `sequence_status` wait.
 const MAX_STATUS_WAIT_MS: u64 = 30_000;
 
@@ -63,6 +65,8 @@ pub struct RunLog {
     pub(super) failures: u32,
     /// sequence_stop asked the run to stop.
     pub(super) stop_requested: bool,
+    /// The player took over with F9; the run stops as sequence_stop stops it.
+    pub(super) taken_over: bool,
     /// The whole result once the run ended, as the blocking form returns it.
     result: Option<Value>,
 }
@@ -114,6 +118,21 @@ impl RunLog {
                     "notes": [],
                 }));
             }
+        }
+        if self.taken_over {
+            self.mark_taken_over();
+        }
+    }
+
+    /// Say in the run's result that the player took over.
+    fn mark_taken_over(&mut self) {
+        let Some(Value::Object(result)) = &mut self.result else {
+            return;
+        };
+        result.insert("taken_over".into(), true.into());
+        let notes = result.entry("notes").or_insert_with(|| json!([]));
+        if let Value::Array(notes) = notes {
+            notes.push(TAKE_OVER_NOTE.into());
         }
     }
 }
@@ -194,6 +213,7 @@ impl Background {
             current: Value::Null,
             failures: 0,
             stop_requested: false,
+            taken_over: false,
             result: None,
         }));
         prepared.attach(Rc::clone(&log));
@@ -309,6 +329,7 @@ impl Background {
                 "recording",
                 "timing",
                 "warm_up",
+                "taken_over",
             ] {
                 if let Some(value) = result.get(field) {
                     answer[field] = value.clone();
@@ -328,6 +349,21 @@ impl Background {
             return Err(Error::Waiting);
         }
         Ok(log.ended(args.verbose))
+    }
+
+    /// The player took over the game with F9 while run `id` played: it stops as sequence_stop
+    /// stops it, and its result says so (also when it had just ended).
+    pub fn take_over(&self, id: &str) {
+        let Some(log) = self.runs.iter().find(|log| log.borrow().id == id) else {
+            return;
+        };
+        let mut log = log.borrow_mut();
+        if std::mem::replace(&mut log.taken_over, true) {
+            return;
+        }
+        if !log.running() {
+            log.mark_taken_over();
+        }
     }
 
     /// Refuse a call made while a run waits that would fight it over an actor's input, or

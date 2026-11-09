@@ -26,6 +26,8 @@ use windows_sys::{
 
 use endpoint::{log, wide};
 
+use crate::lock::{MOTION_X, MOTION_Y, WHEEL_X, WHEEL_Y};
+
 const IIDS: [GUID; 3] = [
     GUID::from_u128(0x11be2a7e_4254_445a_9c09_ffc40f006918),
     GUID::from_u128(0x40ffb7e4_6150_407a_b439_132badc08d2d),
@@ -191,25 +193,38 @@ unsafe extern "system" fn mouse_state_hook(reading: *mut c_void, state: *mut c_v
     }
     let s = &SYNTHETIC;
     s.readings.fetch_add(1, Ordering::Relaxed);
+    // While locked the game sees only the synthetic buttons and none of the real motion.
+    let locked = crate::lock::locked();
+    let shown = |index, real| crate::lock::HIDDEN.shown(index, real, locked);
     if class.version.load(Ordering::Relaxed) == 0 {
         // SAFETY: v0 readings fill a v0 mouse state.
         let mouse = unsafe { &mut *state.cast::<MouseStateV0>() };
+        if locked {
+            mouse.buttons = 0;
+        }
         mouse.buttons |= s.buttons.load(Ordering::Relaxed);
-        mouse.x += s.motion_x.load(Ordering::Relaxed);
-        mouse.y += s.motion_y.load(Ordering::Relaxed);
-        mouse.wheel_x += s.wheel_x.load(Ordering::Relaxed);
-        mouse.wheel_y += s.wheel_y.load(Ordering::Relaxed);
+        mouse.x = shown(MOTION_X, mouse.x) + s.motion_x.load(Ordering::Relaxed);
+        mouse.y = shown(MOTION_Y, mouse.y) + s.motion_y.load(Ordering::Relaxed);
+        mouse.wheel_x = shown(WHEEL_X, mouse.wheel_x) + s.wheel_x.load(Ordering::Relaxed);
+        mouse.wheel_y = shown(WHEEL_Y, mouse.wheel_y) + s.wheel_y.load(Ordering::Relaxed);
         return result;
     }
     // SAFETY: v1 and v2 readings fill a v1 mouse state.
     let mouse = unsafe { &mut *state.cast::<MouseStateV1>() };
-    s.real_x.store(mouse.absolute_x, Ordering::Relaxed);
-    s.real_y.store(mouse.absolute_y, Ordering::Relaxed);
+    if locked {
+        // The pointer stays where it was when the lock started.
+        mouse.buttons = 0;
+        mouse.absolute_x = s.real_x.load(Ordering::Relaxed);
+        mouse.absolute_y = s.real_y.load(Ordering::Relaxed);
+    } else {
+        s.real_x.store(mouse.absolute_x, Ordering::Relaxed);
+        s.real_y.store(mouse.absolute_y, Ordering::Relaxed);
+    }
     mouse.buttons |= s.buttons.load(Ordering::Relaxed);
-    mouse.x += s.motion_x.load(Ordering::Relaxed);
-    mouse.y += s.motion_y.load(Ordering::Relaxed);
-    mouse.wheel_x += s.wheel_x.load(Ordering::Relaxed);
-    mouse.wheel_y += s.wheel_y.load(Ordering::Relaxed);
+    mouse.x = shown(MOTION_X, mouse.x) + s.motion_x.load(Ordering::Relaxed);
+    mouse.y = shown(MOTION_Y, mouse.y) + s.motion_y.load(Ordering::Relaxed);
+    mouse.wheel_x = shown(WHEEL_X, mouse.wheel_x) + s.wheel_x.load(Ordering::Relaxed);
+    mouse.wheel_y = shown(WHEEL_Y, mouse.wheel_y) + s.wheel_y.load(Ordering::Relaxed);
     if s.pointer_active.load(Ordering::Relaxed) {
         // GameInput reports the absolute position in screen coordinates; OreUI screens hit
         // test with it, so a client position here lands their clicks off target.

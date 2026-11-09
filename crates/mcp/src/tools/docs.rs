@@ -7,7 +7,7 @@ use super::{
     Handler, Hints, Tool, Toolset, arguments, reply,
     schema::{describe, object},
 };
-use crate::docs::{mct, molang, schemas};
+use crate::docs::{check, knowledge, mct, molang, schemas, script_api};
 
 pub fn tools() -> Vec<Tool> {
     let tool = |hints: Hints, title: &'static str, run: Handler, definition| {
@@ -28,7 +28,8 @@ pub fn tools() -> Vec<Tool> {
                         "- Runs mct from {setting} or PATH, else npx {package}@{pinned}; needs Node.js 22 or newer.\n",
                         "- suite main runs the common checks, addon the packaging checks, all every check.\n",
                         "- exit_code is 0 for no problems, 3 errors, 4 failed checks, 5 an internal MCT error; findings are kept for each.\n",
-                        "- Some checks download vanilla data.\n\n",
+                        "- Some checks download vanilla data.\n",
+                        "- pack_check finds broken references between files, with their line and column.\n\n",
                         "Returns {{source: \"mct\", ok, exit_code, findings: [{{severity, rule, file, message, data?}}], counts, projects, mct_version, notes}}: ",
                         "severity is error, warning, recommendation or internal_error, rule an id such as CPACKICON, file relative to the pack."
                     ),
@@ -40,6 +41,36 @@ pub fn tools() -> Vec<Tool> {
                     "exclude": { "type": "array", "items": { "type": "string" }, "description": "Rule ids to skip, as in a finding's rule" },
                     "warn_only": { "type": "boolean", "description": "Make MCT exit 0 even with errors; findings are still reported (default false)" }
                 }), &["path"])
+            }),
+        ),
+        tool(
+            Hints::READ.open_world(),
+            "Check pack references",
+            |_, a| reply(check::run(&arguments(a)?)?),
+            json!({
+                "name": "pack_check",
+                "description": format!(
+                    concat!(
+                        "Use this to find broken references between pack files without the game, after you add or rename a texture, function, loot table, item, block, entity, model, animation or sound.\n\n",
+                        "Reads every .json and .mcfunction file of the behavior and resource packs in path and checks that each name a file refers to exists in the add-on or in vanilla. ",
+                        "Vanilla names come from {repository} {pinned}, downloaded once into the cache with curl. Nothing runs and nothing is changed.\n\n",
+                        "- Finds packs by their manifest.json, up to four folders deep; a .mcpack, .mcaddon, .mcworld or .zip is read in place.\n",
+                        "- Reads comments and trailing commas as the game does; a file it cannot parse is a json-syntax error.\n",
+                        "- Rules: texture-missing, loot-table-missing, trade-table-missing, function-missing, item-missing, block-missing, entity-missing, geometry-missing, ",
+                        "render-controller-missing, animation-missing, sound-missing, particle-missing, manifest-dependency-missing, json-syntax.\n",
+                        "- Commands are read in .mcfunction files, tick.json, run_command and queue_command events, and the / lines of behavior animations and controllers: ",
+                        "function, summon, give, setblock, fill, playsound and particle.\n",
+                        "- References into a pack type path lacks (textures without a resource pack) are skipped and named in notes.\n",
+                        "- Without vanilla data, names that may be vanilla are warnings, not errors.\n",
+                        "- Does not check schema fields or Molang; pack_validate and the content log cover those.\n\n",
+                        "Returns {{source: \"references\", ok, diagnostics: [{{file, line, column, severity, rule, message, source}}], counts, files_scanned, packs: [{{label, kind, name, folder}}], vanilla, truncated?, notes}}: ",
+                        "file starts with its pack's label (BP or RP), ok is false when there are errors, vanilla names the identifier data used or is null, ",
+                        "truncated means only the first 1000 diagnostics are listed."
+                    ),
+                    repository = schemas::REPOSITORY,
+                    pinned = schemas::PINNED
+                ),
+                "inputSchema": object(json!({ "path": path }), &["path"])
             }),
         ),
         tool(
@@ -123,6 +154,88 @@ pub fn tools() -> Vec<Tool> {
                     "component": { "type": "string", "description": "A component of kind, with or without the minecraft: prefix (minecraft:health or health)" },
                     "format_version": { "type": "string", "description": "The file's format_version, e.g. 1.21.0, with kind or a document id (default: the newest in format_versions)" }
                 }), &[])
+            }),
+        ),
+        tool(
+            Hints::READ.open_world(),
+            "Script API reference",
+            |s, a| reply(script_api::lookup(s.install(), &arguments(a)?)?),
+            json!({
+                "name": "script_api",
+                "description": concat!(
+                    "Use this to look up a Script API class, method, property or event before you write or fix add-on scripts.\n\n",
+                    "Reads Mojang's script module metadata from the bedrock-samples release that matches the installed game and joins it with the JSDoc of the npm package for the same module version. ",
+                    "symbol gives one declaration in full; query lists matching names. Both are downloaded once into the cache.\n\n",
+                    "- The release follows the installed game (a hotfix uses its release line); when the game version is unknown or has no release, it uses the newest stable release and says so in notes.\n",
+                    "- since is the oldest stable version of the module's major version that has the symbol; beta_only means only the beta module has it, which needs the Beta APIs experiment.\n",
+                    "- An unknown symbol returns found: false with close matches. Without npm the reply has no descriptions and a note says why.\n",
+                    "- Fails when curl is missing or the download fails and nothing is cached; the error names the URL.\n\n",
+                    "Returns {source: {repository, release, game_version, docs}, module, module_version, channel, found, symbol, kind, signature, description, ",
+                    "parameters: [{name, type, optional, default, min, max, description}], returns: {type, description}, throws, privileges, since, beta_only?, members?, examples?, matches?, notes}: ",
+                    "throws names the error classes; privileges are the execution modes allowed to call it (default alone means not in read-only or early execution)."
+                ),
+                "inputSchema": object(json!({
+                    "symbol": { "type": "string", "description": "A declaration: Entity, Entity.applyDamage, world.afterEvents.entityDie or system.runTimeout; not with query" },
+                    "query": { "type": "string", "description": "Text to find in symbol names, ignoring case, e.g. entityDie; not with symbol" },
+                    "module": { "type": "string", "description": "The script module, with or without @minecraft/ (default: @minecraft/server)" },
+                    "version": { "type": "string", "description": "stable (default: the newest stable version in the release), beta, or an exact module version such as 2.4.0" }
+                }), &[])
+            }),
+        ),
+        tool(
+            Hints::READ.open_world(),
+            "Component reference",
+            |s, a| reply(knowledge::component(s.install(), &arguments(a)?)?),
+            json!({
+                "name": "component_docs",
+                "description": concat!(
+                    "Use this to learn what a component's properties mean, with their types and defaults, before you write it into a pack file.\n\n",
+                    "Reads the component's schema from Mojang's JSON schema metadata in the bedrock-samples release that matches the installed game: each property's type, default, range and description. ",
+                    "It also gives the rockide schema id for schema_get and the vanilla files that use the component.\n\n",
+                    "- Searches every kind unless kind is given; a component of several kinds, such as minecraft:tags, needs kind.\n",
+                    "- When Mojang's metadata gives a component no properties (minecraft:health), they come from the rockide schema; properties_source and a note say so.\n",
+                    "- An unknown component returns found: false with close names.\n\n",
+                    "Returns {source, found, kind, component, description, format_version, forms, properties: [{name, type, default, description, minimum, maximum, values, fields}], ",
+                    "required?, schema_file, rockide_schema, vanilla_examples: {count, files}, properties_source?, matches?, notes}: forms are the value shapes the component accepts (boolean, object, ...); ",
+                    "fields are the keys of an object property; schema_file and vanilla files are paths in the release."
+                ),
+                "inputSchema": object(json!({
+                    "component": { "type": "string", "description": "The component, with or without the minecraft: prefix (minecraft:behavior.tempt or health)" },
+                    "kind": { "type": "string", "enum": knowledge::kind_names(), "description": "The file type the component belongs to (default: every kind)" }
+                }), &["component"])
+            }),
+        ),
+        tool(
+            Hints::READ.open_world(),
+            "Command reference",
+            |s, a| reply(knowledge::command(s.install(), &arguments(a)?)?),
+            json!({
+                "name": "command_docs",
+                "description": concat!(
+                    "Use this to check a slash command's syntax before you run it or put it in a function file.\n\n",
+                    "Reads the command list in Mojang's metadata from the bedrock-samples release that matches the installed game: each overload's parameters, their types and the values of enum parameters.\n\n",
+                    "- Takes aliases and a leading slash; an unknown name returns found: false with commands whose name or description match.\n",
+                    "- Enum parameters with more than 60 values (every item or block id) give value_count instead of values.\n\n",
+                    "Returns {source, found, name, description, aliases, permission_level, requires_cheats, overloads: [{usage, params: [{name, type, optional, values?, value_count?}]}], matches?, notes}: ",
+                    "usage puts required parameters in <> and optional ones in []."
+                ),
+                "inputSchema": object(json!({ "name": { "type": "string", "description": "The command, e.g. give or /gamemode" } }), &["name"])
+            }),
+        ),
+        tool(
+            Hints::READ.open_world(),
+            "Molang reference",
+            |s, a| reply(knowledge::molang(s.install(), &arguments(a)?)?),
+            json!({
+                "name": "molang_docs",
+                "description": concat!(
+                    "Use this to check what a Molang query or math function returns and which arguments it takes.\n\n",
+                    "Reads the Molang query and math function list in Mojang's metadata from the bedrock-samples release that matches the installed game.\n\n",
+                    "- Takes query.x, q.x, math.x or a bare name; an unknown name returns found: false with entries whose name or description match.\n\n",
+                    "Returns {source, found, kind, name, description, return_type, min_args, max_args, version_ranges, matches?, notes}: ",
+                    "version_ranges give the first (and last) game version a query works in."
+                ),
+                "inputSchema": object(json!({ "name": { "type": "string", "description": "The query or function, e.g. query.is_sneaking, q.health or math.lerp" } }), &["name"])
             }),
         ),
         tool(

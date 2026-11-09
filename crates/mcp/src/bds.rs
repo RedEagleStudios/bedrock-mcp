@@ -19,6 +19,7 @@ use crate::{
     content_log,
     error::{Error, Result, bail},
     gametest::{self, Run},
+    log_diagnostics::{self, Diagnostic, LogEntry, PackRoot, Severity},
     nbt::{LevelDat, Tag},
     packs::{self, Kind, Pack},
     worlds::{self, WorldFolder},
@@ -68,6 +69,11 @@ const ANSWER_WINDOW: Duration = Duration::from_secs(2);
 const TICK: Duration = Duration::from_millis(100);
 /// Lines of the log quoted when the server does not start.
 const LOG_TAIL: usize = 20;
+/// A load check stops once output was quiet this long after "Server started.", which covers
+/// the scripts' first run and function loading.
+const CHECK_QUIET: Duration = Duration::from_secs(2);
+/// ... or this long after the start, for packs whose scripts keep logging.
+const CHECK_AFTER_START: Duration = Duration::from_secs(15);
 
 pub const DEFAULT_TIMEOUT_MS: u64 = 900_000;
 pub const DEFAULT_IDLE_MS: u64 = 120_000;
@@ -111,7 +117,7 @@ fn data_home() -> PathBuf {
         .unwrap_or_default()
 }
 
-fn development_dir(kind: Kind) -> &'static str {
+pub fn development_dir(kind: Kind) -> &'static str {
     match kind {
         Kind::Behavior => "development_behavior_packs",
         Kind::Resource => "development_resource_packs",
@@ -129,74 +135,34 @@ pub fn run(options: &Options) -> Result<Value> {
     {
         bail!("Console command {bad:?} spans several lines; give one command per entry.");
     }
-    if !options.server.join(BINARY).is_file() {
-        bail!(
-            "No Bedrock Dedicated Server at {} ({BINARY} is missing). Download it from {DOWNLOAD}, \
-             unzip it there, or pass server or set {SERVER_SETTING} to its folder.",
-            options.server.display()
-        );
-    }
     let dir = &options.run_dir;
-    if dir.exists() {
-        fs::remove_dir_all(dir)
-            .map_err(|error| Error::msg(format!("Cannot clear {}: {error}", dir.display())))?;
-    }
-    fs::create_dir_all(dir)?;
-    link_server(&options.server, dir)?;
-    write_properties(dir)?;
-    for kind in [Kind::Behavior, Kind::Resource] {
-        fs::create_dir_all(dir.join(development_dir(kind)))?;
-    }
-    let world = dir.join("worlds").join(LEVEL_NAME);
-    fs::create_dir_all(dir.join("worlds"))?;
     let log_path = dir.join("server.log");
-    let mut log = BufWriter::new(fs::File::create(&log_path)?);
-    let mut notes: Vec<String> = Vec::new();
-
-    let user = user_packs(&options.packs)?;
-    match &options.world {
-        Some((client, shared)) => {
-            copy_dir(&client.path, &world)?;
-            fs::write(world.join("levelname.txt"), LEVEL_NAME)?;
-            link_world_packs(&world, shared, dir, &user, &mut notes)?;
-        }
-        None => create_world(dir, &world, &mut log)?,
-    }
-    prepare_level(&world.join("level.dat"), options.world.is_none())?;
-    for (kind, pack, source) in &user {
-        let target = unique_child(&dir.join(development_dir(*kind)), source);
-        link_dir(source, &target)?;
-        let list_path = world.join(kind.world_list());
-        let mut list = packs::read_pack_list(&list_path)?;
-        let entry = worlds::entry(pack);
-        match list
-            .iter_mut()
-            .find(|item| item.pack_id.eq_ignore_ascii_case(&pack.uuid))
-        {
-            Some(item) => *item = entry,
-            None => list.insert(0, entry),
-        }
-        packs::write_pack_list(&list_path, &list)?;
-    }
-    for kind in [Kind::Behavior, Kind::Resource] {
-        let list_path = world.join(kind.world_list());
-        if !list_path.exists() {
-            packs::write_pack_list(&list_path, &[])?;
-        }
-    }
+    let Scratch {
+        log,
+        user: _,
+        mut notes,
+    } = prepare_scratch(&ScratchSpec {
+        server: &options.server,
+        dir,
+        log_path: &log_path,
+        packs: &options.packs,
+        world: options.world.as_ref(),
+        beta_apis: true,
+        timeout: START_TIMEOUT,
+    })?;
 
     let mut server = Server::start(dir, log)?;
     if !server.wait_started(START_TIMEOUT) {
         let output = server.stop();
-        let tail = log_tail(&log_path);
-        let reason = if output.exited {
-            "exited"
-        } else {
-            "did not start"
-        };
         bail!(
-            "The server {reason} before \"Server started.\" (log {}). Last lines:\n{tail}",
-            log_path.display()
+            "The server {} before \"Server started.\" (log {}). Last lines:\n{}",
+            if output.exited {
+                "exited"
+            } else {
+                "did not start"
+            },
+            log_path.display(),
+            log_tail(&log_path)
         );
     }
     for rule in GAMERULES {
@@ -230,9 +196,10 @@ pub fn run(options: &Options) -> Result<Value> {
     let passed = output.results.iter().filter(|result| result.passed).count();
     let errors = content_log::summarize(
         output
-            .errors
+            .problems
             .iter()
-            .map(|(area, message)| (area.as_str(), "ERROR", message.as_str())),
+            .filter(|problem| problem.level == "ERROR")
+            .map(|problem| (problem.area.as_str(), "ERROR", problem.message.as_str())),
     );
     match &outcome {
         Outcome::Done => {}
@@ -297,13 +264,240 @@ pub fn run(options: &Options) -> Result<Value> {
     }))
 }
 
+/// What a load check uses.
+pub struct CheckOptions {
+    pub server: PathBuf,
+    /// The scratch folder, recreated by the check and removed after it.
+    pub run_dir: PathBuf,
+    /// Where the server's output goes; it outlives the scratch folder.
+    pub log_path: PathBuf,
+    pub packs: Vec<PathBuf>,
+    pub beta_apis: bool,
+    /// The whole check: world creation, start and the quiet wait.
+    pub timeout: Duration,
+}
+
+/// Start a server with the packs in a fresh flat world, collect what it reports while it
+/// loads them, stop it and remove the scratch folder; see the `bds_check` tool for the reply.
+pub fn check(options: &CheckOptions) -> Result<Value> {
+    let began = Instant::now();
+    if options.packs.is_empty() {
+        bail!("Give at least one pack folder to check.");
+    }
+    let prepared = prepare_scratch(&ScratchSpec {
+        server: &options.server,
+        dir: &options.run_dir,
+        log_path: &options.log_path,
+        packs: &options.packs,
+        world: None,
+        beta_apis: options.beta_apis,
+        timeout: options.timeout,
+    });
+    let result = prepared.and_then(|scratch| check_loaded(options, scratch, began));
+    let _ = fs::remove_dir_all(&options.run_dir);
+    result
+}
+
+fn check_loaded(options: &CheckOptions, scratch: Scratch, began: Instant) -> Result<Value> {
+    let Scratch {
+        log,
+        user,
+        mut notes,
+    } = scratch;
+    let mut server = Server::start(&options.run_dir, log)?;
+    let remaining = options.timeout.saturating_sub(began.elapsed());
+    let started = server.wait_started(remaining);
+    let timed_out = if started {
+        !server.wait_quiet(
+            CHECK_QUIET,
+            CHECK_AFTER_START.min(options.timeout.saturating_sub(began.elapsed())),
+        )
+    } else {
+        !server.output.exited
+    };
+    let output = server.stop();
+    if !started {
+        notes.push(format!(
+            "The server {} before \"Server started.\". Last lines of the log:\n{}",
+            if timed_out {
+                "did not start within timeout_ms"
+            } else {
+                "exited"
+            },
+            log_tail(&options.log_path)
+        ));
+    } else if timed_out {
+        notes.push(format!(
+            "The server kept printing for {} s after it started, so the check stopped it; \
+             later problems are not listed.",
+            CHECK_AFTER_START.as_secs()
+        ));
+    }
+    if !output.exited_cleanly {
+        notes.push("The server did not quit after stop and was killed.".into());
+    }
+    let roots: Vec<PackRoot> = user
+        .iter()
+        .map(|(kind, pack, path)| PackRoot {
+            kind: *kind,
+            path: path.clone(),
+            name: pack.name.clone(),
+        })
+        .collect();
+    let entries: Vec<LogEntry> = output
+        .problems
+        .iter()
+        .map(|problem| LogEntry {
+            area: &problem.area,
+            level: &problem.level,
+            message: &problem.message,
+        })
+        .collect();
+    let mut diagnostics = log_diagnostics::map(&entries, &roots, "bds");
+    if started {
+        diagnostics.extend(unloaded_packs(&roots, &user, &output.pack_stack));
+    }
+    Ok(json!({
+        "server": { "path": options.server, "version": output.version },
+        "started": started,
+        "timed_out": timed_out,
+        "diagnostics": diagnostics,
+        "counts": log_diagnostics::counts(&diagnostics),
+        "pack_stack": output.pack_stack,
+        "log": options.log_path,
+        "elapsed_ms": began.elapsed().as_millis() as u64,
+        "notes": notes,
+    }))
+}
+
+/// An error for each given pack the server's pack stack does not list.
+fn unloaded_packs(roots: &[PackRoot], user: &[UserPack], pack_stack: &[String]) -> Vec<Diagnostic> {
+    user.iter()
+        .zip(roots)
+        .filter(|((_, pack, _), _)| {
+            let id = format!("id: {}", pack.uuid.to_ascii_lowercase());
+            !pack_stack
+                .iter()
+                .any(|line| line.to_ascii_lowercase().contains(&id))
+        })
+        .map(|((kind, pack, _), _)| Diagnostic {
+            file: Some(format!(
+                "{}/manifest.json",
+                match kind {
+                    Kind::Behavior => "BP",
+                    Kind::Resource => "RP",
+                }
+            )),
+            line: None,
+            column: None,
+            severity: Severity::Error,
+            rule: "pack-not-loaded".into(),
+            message: format!(
+                "The server's pack stack does not list {} ({}); the server may be older than \
+                 its min_engine_version or Script API module versions.",
+                pack.name, pack.uuid
+            ),
+            source: "bds",
+            in_pack: true,
+        })
+        .collect()
+}
+
+/// A given pack: its kind, manifest and canonical folder.
+pub type UserPack = (Kind, Pack, PathBuf);
+
+/// What a scratch server needs.
+struct ScratchSpec<'a> {
+    server: &'a Path,
+    dir: &'a Path,
+    log_path: &'a Path,
+    packs: &'a [PathBuf],
+    world: Option<&'a (WorldFolder, PathBuf)>,
+    beta_apis: bool,
+    /// For making a fresh world.
+    timeout: Duration,
+}
+
+/// A scratch server folder ready to start: its log, the given packs and notes so far.
+struct Scratch {
+    log: BufWriter<fs::File>,
+    user: Vec<UserPack>,
+    notes: Vec<String>,
+}
+
+/// Recreate `dir` as a server folder that links the server's files, holds a copy of the
+/// client world or a fresh flat one, and applies the given packs to it.
+fn prepare_scratch(spec: &ScratchSpec) -> Result<Scratch> {
+    if !spec.server.join(BINARY).is_file() {
+        bail!(
+            "No Bedrock Dedicated Server at {} ({BINARY} is missing). Download it from {DOWNLOAD}, \
+             unzip it there, or pass server or set {SERVER_SETTING} to its folder.",
+            spec.server.display()
+        );
+    }
+    let user = user_packs(spec.packs)?;
+    let dir = spec.dir;
+    if dir.exists() {
+        fs::remove_dir_all(dir)
+            .map_err(|error| Error::msg(format!("Cannot clear {}: {error}", dir.display())))?;
+    }
+    fs::create_dir_all(dir)?;
+    link_server(spec.server, dir)?;
+    write_properties(dir)?;
+    for kind in [Kind::Behavior, Kind::Resource] {
+        fs::create_dir_all(dir.join(development_dir(kind)))?;
+    }
+    let world = dir.join("worlds").join(LEVEL_NAME);
+    fs::create_dir_all(dir.join("worlds"))?;
+    if let Some(parent) = spec.log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut log = BufWriter::new(fs::File::create(spec.log_path)?);
+    let mut notes: Vec<String> = Vec::new();
+    match spec.world {
+        Some((client, shared)) => {
+            copy_dir(&client.path, &world)?;
+            fs::write(world.join("levelname.txt"), LEVEL_NAME)?;
+            link_world_packs(&world, shared, dir, &user, &mut notes)?;
+        }
+        None => create_world(dir, &world, &mut log, spec.log_path, spec.timeout)?,
+    }
+    prepare_level(
+        &world.join("level.dat"),
+        spec.world.is_none(),
+        spec.beta_apis,
+    )?;
+    for (kind, pack, source) in &user {
+        let target = unique_child(&dir.join(development_dir(*kind)), source);
+        link_dir(source, &target)?;
+        let list_path = world.join(kind.world_list());
+        let mut list = packs::read_pack_list(&list_path)?;
+        let entry = worlds::entry(pack);
+        match list
+            .iter_mut()
+            .find(|item| item.pack_id.eq_ignore_ascii_case(&pack.uuid))
+        {
+            Some(item) => *item = entry,
+            None => list.insert(0, entry),
+        }
+        packs::write_pack_list(&list_path, &list)?;
+    }
+    for kind in [Kind::Behavior, Kind::Resource] {
+        let list_path = world.join(kind.world_list());
+        if !list_path.exists() {
+            packs::write_pack_list(&list_path, &[])?;
+        }
+    }
+    Ok(Scratch { log, user, notes })
+}
+
 /// For `gametest run`, the number of runs; the server prints no count for it.
 fn single_test_runs(run: &Run) -> Option<usize> {
     run.test.as_ref().map(|_| run.repeat.unwrap_or(1) as usize)
 }
 
 /// The given pack folders with their kind; the manifest decides.
-fn user_packs(paths: &[PathBuf]) -> Result<Vec<(Kind, Pack, PathBuf)>> {
+pub fn user_packs(paths: &[PathBuf]) -> Result<Vec<UserPack>> {
     let mut found = Vec::new();
     for path in paths {
         let source = fs::canonicalize(path)
@@ -437,7 +631,7 @@ fn link_dir(source: &Path, target: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn copy_dir(source: &Path, target: &Path) -> io::Result<()> {
+pub fn copy_dir(source: &Path, target: &Path) -> io::Result<()> {
     fs::create_dir_all(target)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
@@ -493,33 +687,41 @@ fn write_properties(dir: &Path) -> Result<()> {
 }
 
 /// Let the server make a world, then empty its chunks so the flat generator takes over.
-fn create_world(dir: &Path, world: &Path, log: &mut BufWriter<fs::File>) -> Result<()> {
+fn create_world(
+    dir: &Path,
+    world: &Path,
+    log: &mut BufWriter<fs::File>,
+    log_path: &Path,
+    timeout: Duration,
+) -> Result<()> {
     let first = log.get_ref().try_clone()?;
     let mut server = Server::start(dir, BufWriter::new(first))?;
-    let started = server.wait_started(START_TIMEOUT);
+    let started = server.wait_started(timeout);
     server.stop();
-    let _ = writeln!(log, "--- world created; test run follows ---");
+    let _ = writeln!(log, "--- world created; the server starts again ---");
     if !started || !world.join("level.dat").is_file() {
         bail!(
             "The server did not create a world in {} (log {}). Last lines:\n{}",
             world.display(),
-            dir.join("server.log").display(),
-            log_tail(&dir.join("server.log"))
+            log_path.display(),
+            log_tail(log_path)
         );
     }
     fs::remove_dir_all(world.join("db"))?;
     Ok(())
 }
 
-/// Turn on the Beta APIs experiment, and the flat generator for a fresh world.
-fn prepare_level(path: &Path, flat: bool) -> Result<()> {
+/// Turn on the Beta APIs experiment when asked, and the flat generator for a fresh world.
+fn prepare_level(path: &Path, flat: bool, beta_apis: bool) -> Result<()> {
     let data = fs::read(path)
         .map_err(|error| Error::msg(format!("Cannot read {}: {error}", path.display())))?;
     let mut level = LevelDat::parse(&data)
         .map_err(|error| Error::msg(format!("{}: {error}", path.display())))?;
-    let experiments = level.root.compound_mut("experiments");
-    for key in BETA_EXPERIMENTS {
-        experiments.set(key, Tag::Byte(1));
+    if beta_apis {
+        let experiments = level.root.compound_mut("experiments");
+        for key in BETA_EXPERIMENTS {
+            experiments.set(key, Tag::Byte(1));
+        }
     }
     if flat {
         level.root.set("Generator", Tag::Int(FLAT_GENERATOR));
@@ -585,11 +787,19 @@ struct Output {
     /// GameTest lines seen: batches, structure loads and results.
     activity: usize,
     pack_stack: Vec<String>,
-    /// ERROR entries as (area, message), continuation lines joined.
-    errors: Vec<(String, String)>,
+    /// ERROR and WARN entries in order, continuation lines joined.
+    problems: Vec<Problem>,
     pending: Option<(String, String)>,
     exited: bool,
     exited_cleanly: bool,
+}
+
+/// A console ERROR or WARN entry: `[2026-01-02 03:04:05:678 ERROR] [Recipes] message`.
+#[derive(Debug, PartialEq)]
+struct Problem {
+    level: String,
+    area: String,
+    message: String,
 }
 
 impl Output {
@@ -636,10 +846,14 @@ impl Output {
 
     fn flush(&mut self) {
         if let Some((level, message)) = self.pending.take()
-            && level == "ERROR"
+            && matches!(level.as_str(), "ERROR" | "WARN")
         {
             let (area, message) = split_area(&message);
-            self.errors.push((area.to_owned(), message.to_owned()));
+            self.problems.push(Problem {
+                level,
+                area: area.to_owned(),
+                message: message.to_owned(),
+            });
         }
     }
 
@@ -773,6 +987,20 @@ impl Server {
         self.output.started
     }
 
+    /// Read until no line arrives for `quiet`; false when `limit` passed first.
+    fn wait_quiet(&mut self, quiet: Duration, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
+        loop {
+            if self.output.exited || self.last_line.elapsed() >= quiet {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            self.next(TICK);
+        }
+    }
+
     fn send(&mut self, line: &str) {
         let _ = writeln!(self.log, "> {line}");
         if let Some(stdin) = &mut self.stdin
@@ -818,7 +1046,7 @@ impl Server {
         single_runs: Option<usize>,
         options: &Options,
     ) -> Outcome {
-        let errors_before = self.output.errors.len();
+        let problems_before = self.output.problems.len();
         self.send(command);
         let sent = Instant::now();
         let deadline = sent + options.timeout;
@@ -837,8 +1065,11 @@ impl Server {
             seen = (self.output.activity, self.output.result_lines);
             if self.output.activity == 0 && now - sent <= ANSWER_WINDOW + TICK {
                 self.output.flush();
-                if let Some((_, message)) = self.output.errors.get(errors_before) {
-                    return Outcome::Answer(message.clone());
+                if let Some(problem) = self.output.problems[problems_before..]
+                    .iter()
+                    .find(|problem| problem.level == "ERROR")
+                {
+                    return Outcome::Answer(problem.message.clone());
                 }
             }
             let expected = single_runs.or(self.output.expected);
@@ -942,11 +1173,16 @@ mod tests {
                 },
             ]
         );
+        let problem = |area: &str, message: &str| Problem {
+            level: "ERROR".into(),
+            area: area.into(),
+            message: message.into(),
+        };
         assert_eq!(
-            output.errors,
+            output.problems,
             vec![
-                ("Scripting".into(), "boom\n    at main.js:1".into()),
-                (String::new(), "No tests found for tag 'x'".into()),
+                problem("Scripting", "boom\n    at main.js:1"),
+                problem("", "No tests found for tag 'x'"),
             ]
         );
         assert_eq!(output.pack_stack.len(), 1);
@@ -971,7 +1207,7 @@ mod tests {
             root: crate::nbt::Compound(vec![("Generator".into(), Tag::Int(1))]),
         };
         fs::write(&path, level.to_bytes().unwrap()).unwrap();
-        prepare_level(&path, true).unwrap();
+        prepare_level(&path, true, true).unwrap();
         let level = LevelDat::parse(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(level.root.get("Generator"), Some(&Tag::Int(FLAT_GENERATOR)));
         let Some(Tag::Compound(experiments)) = level.root.get("experiments") else {
@@ -980,5 +1216,69 @@ mod tests {
         for key in BETA_EXPERIMENTS {
             assert_eq!(experiments.get(key), Some(&Tag::Byte(1)));
         }
+    }
+
+    #[test]
+    fn load_problems_map_to_pack_files_and_lines() {
+        let dir = TestDir::new("bds-check");
+        let bp = dir.path().join("demo_bp");
+        fs::create_dir_all(bp.join("recipes")).unwrap();
+        fs::create_dir_all(bp.join("functions")).unwrap();
+        fs::write(
+            bp.join("recipes/broken.json"),
+            "{\n  \"format_version\": \"1.20.10\"\n  \"x\": 1\n}\n",
+        )
+        .unwrap();
+        fs::write(bp.join("functions/setup.mcfunction"), "say hi\nbad\n").unwrap();
+        let output = feed(&[
+            "[2026-01-02 03:04:05:678 INFO] Pack Stack - None",
+            "[2026-01-02 03:04:05:678 ERROR] [Recipes]  | JSON: recipes/broken.json has an error: ",
+            " * Line 3, Column 3",
+            "  Missing ',' or '}' in object declaration",
+            "",
+            "[2026-01-02 03:04:05:678 INFO] Server started.",
+            "[2026-01-02 03:04:05:678 WARN] [Commands] Function setup failed to load correctly with error(s):",
+            "",
+            "[2026-01-02 03:04:05:678 WARN] [Commands] Error on line 2: unknown or invalid command 'bad'",
+        ]);
+        let roots = [PackRoot {
+            kind: Kind::Behavior,
+            path: bp.clone(),
+            name: "Demo BP".into(),
+        }];
+        let entries: Vec<LogEntry> = output
+            .problems
+            .iter()
+            .map(|problem| LogEntry {
+                area: &problem.area,
+                level: &problem.level,
+                message: &problem.message,
+            })
+            .collect();
+        let found = log_diagnostics::map(&entries, &roots, "bds");
+        assert_eq!(found.len(), 3, "{found:#?}");
+        assert_eq!(found[0].file.as_deref(), Some("BP/recipes/broken.json"));
+        assert_eq!((found[0].line, found[0].column), (Some(3), Some(3)));
+        assert_eq!(found[0].severity, Severity::Error);
+        assert_eq!(
+            found[2].file.as_deref(),
+            Some("BP/functions/setup.mcfunction")
+        );
+        assert_eq!(found[2].line, Some(2));
+        assert_eq!(found[2].severity, Severity::Warning);
+
+        let pack = Pack {
+            name: "Demo BP".into(),
+            uuid: "AB12".into(),
+            version: json!([1, 0, 0]),
+            folder: "demo_bp".into(),
+            location: "given".into(),
+        };
+        let user = [(Kind::Behavior, pack, bp)];
+        let missing = unloaded_packs(&roots, &user, &output.pack_stack);
+        assert_eq!(missing[0].file.as_deref(), Some("BP/manifest.json"));
+        assert_eq!(missing[0].rule, "pack-not-loaded");
+        let listed = ["[00] Demo BP (id: ab12, version: 1.0.0) @ x".to_owned()];
+        assert!(unloaded_packs(&roots, &user, &listed).is_empty());
     }
 }

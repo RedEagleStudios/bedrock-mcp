@@ -249,6 +249,9 @@ impl Session {
         if self.in_world(&mut Vec::new()).0 == Some(true) {
             bail!("The game is already in a world; call world_leave first.");
         }
+        if let Ok(world) = &self.world {
+            world.forget_bridge();
+        }
         let timeout = args
             .timeout_ms
             .map_or(DEFAULT_OPEN_TIMEOUT, Duration::from_millis);
@@ -798,6 +801,9 @@ impl Session {
         let mut notes = Vec::new();
         if self.in_world(&mut Vec::new()).0 == Some(false) {
             bail!("The game is not in a world.");
+        }
+        if let Ok(world) = &self.world {
+            world.forget_bridge();
         }
         let screens = self.unstable_capability("screens", &mut notes);
         let mut clicked = Vec::new();

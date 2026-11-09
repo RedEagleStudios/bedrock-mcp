@@ -5,8 +5,10 @@ mod events;
 mod files;
 mod hud;
 mod lifecycle;
+mod lock;
 mod observe;
 mod play;
+mod reload;
 mod render;
 mod scene;
 mod sequences;
@@ -50,6 +52,7 @@ use crate::{
 };
 
 use lifecycle::LocalServer;
+use lock::InputLock;
 
 /// How long the game gets to connect after the agent typed `/connect`.
 const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -89,6 +92,8 @@ pub struct Session {
     client_gone: Option<Arc<AtomicBool>>,
     /// One line per tool call; see [`timeline`].
     timeline: crate::timeline::Timeline,
+    /// Keeps the player's real input out while the server plays; see [`lock`].
+    lock: InputLock,
 }
 
 impl Session {
@@ -126,11 +131,17 @@ impl Session {
             events: EventHub::default(),
             background: Background::default(),
             client_gone: None,
+            lock: InputLock::from_env(),
         }
     }
 
     pub(crate) fn world(&self) -> Result<World> {
         self.world.clone().map_err(Error::Message)
+    }
+
+    /// The game installation this session drives.
+    pub(crate) fn install(&self) -> &Install {
+        &self.install
     }
 
     fn running_pid(&self) -> Result<u32> {
@@ -192,6 +203,7 @@ impl Session {
         loop {
             if self.agent.is_none() {
                 self.agent = Some(inject::attach(&self.install, &*self.clock)?);
+                self.lock.forget();
             }
             let agent = self.agent.as_mut().expect("attached above");
             match action(agent, &mut self.controller) {
@@ -228,7 +240,7 @@ impl Session {
         let command = format!("/connect 127.0.0.1:{}", world.socket().port());
         let bindings = self.bindings();
         let clock = Arc::clone(&self.clock);
-        self.with_agent(|agent, controller| {
+        self.with_input(|agent, controller| {
             controller.send_chat(agent, &*clock, &bindings, &command)
         })?;
         if !world.socket().wait_connected(WEBSOCKET_CONNECT_TIMEOUT) {
@@ -273,7 +285,7 @@ impl Session {
         }
         let escape = keys::resolve("Escape", &self.bindings())?;
         let clock = Arc::clone(&self.clock);
-        self.with_agent(|agent, controller| {
+        self.with_input(|agent, controller| {
             controller.press(agent, &*clock, std::slice::from_ref(&escape), 1)
         })?;
         let closed = poll(
@@ -304,7 +316,11 @@ impl ToolServer for Session {
 
     fn call(&mut self, name: &str, arguments: Value) -> Result<Vec<Content>> {
         let call = self.call_started(name, &arguments);
-        let allowed = if self.background.nested {
+        let nested = self.background.nested;
+        if !nested {
+            self.lock.call_started();
+        }
+        let allowed = if nested {
             self.background.conflict(name, &arguments)
         } else {
             Ok(())
@@ -313,11 +329,16 @@ impl ToolServer for Session {
             let toolsets = self.toolsets.clone();
             tools::call(&toolsets, self, name, arguments)
         });
+        // A run keeps the lock until it ends; see work.
+        if !nested && self.background.active().is_none() {
+            self.unlock_input();
+        }
         self.call_finished(call, &result);
         result
     }
 
     fn close(&mut self) {
+        self.unlock_input();
         self.release_session();
     }
 
@@ -327,8 +348,14 @@ impl ToolServer for Session {
         if run.is_some() {
             self.background_busy(true);
         }
+        if self.background.driving_self().is_some() {
+            self.lock_input();
+        }
         self.run_background(pump);
         if let Some(run) = run {
+            if self.unlock_input() {
+                self.background.take_over(&run);
+            }
             self.background_busy(false);
             self.mark(&format!("{run} ended"));
         }

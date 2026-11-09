@@ -832,6 +832,14 @@ impl Catalog {
     }
 }
 
+/// The pinned release's folder, downloaded on first use, and a note when an incomplete
+/// cached copy was replaced.
+pub fn release_dir() -> Result<(PathBuf, Option<String>)> {
+    ensure_in(&cache_dir()?.join("rockide-schemas"), PINNED, |archive| {
+        download(&archive_url(PINNED), archive, DOWNLOAD_TIMEOUT)
+    })
+}
+
 /// The pinned release's catalog, downloaded on first use and kept for the process, and a
 /// note when an incomplete cached copy was replaced.
 fn catalog() -> Result<(Arc<Catalog>, Option<String>)> {
@@ -843,9 +851,7 @@ fn catalog() -> Result<(Arc<Catalog>, Option<String>)> {
     {
         return Ok((catalog.clone(), None));
     }
-    let (dir, note) = ensure_in(&home, PINNED, |archive| {
-        download(&archive_url(PINNED), archive, DOWNLOAD_TIMEOUT)
-    })?;
+    let (dir, note) = release_dir()?;
     let catalog = Arc::new(Catalog::load(&dir)?);
     *loaded = Some(catalog.clone());
     Ok((catalog, note))

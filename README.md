@@ -174,6 +174,7 @@ MCP client configuration:
 | `BEDROCK_MCP_TOOLSETS` | Comma-separated toolsets to offer, for example `game,player,actions,docs`. Unset offers all of them. An unknown name stops the server with the list of valid ones. |
 | `BEDROCK_MCP_WORKSPACE` | Linux: the Hyprland workspace the game window opens on, without switching you to it. |
 | `BEDROCK_MCP_UNSTABLE` | `0` keeps the unstable layer from loading. |
+| `BEDROCK_MCP_INPUT_LOCK` | `0` turns off the input lock. By default, while the server plays, your real keyboard and mouse are locked out of the game. |
 | `BEDROCK_MCP_WINDOWS_DIR` | Linux: where the Windows build outputs are. |
 | `BEDROCK_MCP_LAUNCH_COMMAND` | Linux: a shell command `game_launch` runs (detached, through `sh -c`, with the game arguments as `$@`) to start the game when none runs, instead of mcbe-gdk-linux. The server then waits for the game process and attaches. Its output goes to `${XDG_DATA_HOME:-~/.local/share}/bedrock-mcp/launch-command.log`. |
 | `MCBE_GDK_ROOT`, `BOL_WINEPREFIX` | Linux: where mcbe-gdk-linux is installed (default `${XDG_DATA_HOME:-~/.local/share}/mcbe-gdk-linux`) and its Wine prefix, used when no game runs. |
@@ -278,6 +279,11 @@ structure save demo:walk 0 -60 0 4 -56 4 disk
 BDS can trail the client's version. A pack whose `min_engine_version` or Script API module
 versions the server does not know fails to load; the reply's `errors` and `pack_stack` show it.
 
+`bds_check {packs}` loads packs on the same server in a throwaway flat world, with no game client,
+and returns the errors and warnings the server printed while it loaded the packs and ran their
+scripts, as diagnostics (see [Edit, reload, check](#edit-reload-check)), with counts and the time
+taken. It deletes its scratch world afterwards and keeps the server log in the agent folder.
+
 ## Tools
 
 Every read returns `source` (`bridge`, `command`, `event`, `native`, `gametest` or `input`) and
@@ -293,23 +299,59 @@ and a test fails when it falls out of date.
 | `game` | `game_launch`, `world_open`, `world_leave`, `server_join`, `game_status`, `hud_get`, `game_stop`, `game_crash` |
 | `player` | `player_get`, `player_set`, `inventory_get`, `hotbar_select`, `look_at` |
 | `world` | `target_get`, `entities_list`, `entity_inspect`, `entity_components_get`, `entity_properties_get`, `dynamic_properties_get`, `block_inspect`, `raycast`, `container_get`, `item_inspect`, `world_info`, `scoreboard_get` |
-| `actions` | `input_send`, `ui_click`, `ui_tree`, `item_use`, `item_use_on`, `attack`, `entity_interact`, `block_break`, `block_place`, `item_drop`, `movement_set`, `entity_spawn`, `action_sequence`, `sequence_status`, `sequence_stop` |
+| `actions` | `input_send`, `ui_click`, `ui_tree`, `item_use`, `item_use_on`, `attack`, `fight`, `entity_interact`, `block_break`, `block_place`, `item_drop`, `movement_set`, `entity_spawn`, `action_sequence`, `sequence_status`, `sequence_stop` |
 | `gametest` | `gametest_spawn`, `gametest_list`, `gametest_remove`, `gametest_run`, `gametest_server` |
 | `automation` | `automation_connect`, `automation_status`, `command_execute`, `chat_send`, `events_list`, `event_subscribe`, `event_unsubscribe`, `events_read`, `wait_until`, `scene_save`, `scene_reset` |
 | `media` | `frame_capture`, `video_start`, `video_stop`, `video_analyze`, `timeline_read`, `camera_play`, `camera_get`, `camera_set` |
-| `dev` | `content_log_read`, `log_levels_set`, `log_levels_get`, `packs_install`, `packs_global`, `worlds_list`, `world_packs_set`, `skin_install`, `unstable_status`, `player_render_get`, `perf_get` |
-| `docs` | `pack_validate`, `pack_info`, `pack_fix_versions`, `schema_list`, `schema_get`, `molang_eval` |
+| `dev` | `content_log_read`, `log_levels_set`, `log_levels_get`, `packs_install`, `packs_global`, `worlds_list`, `world_packs_set`, `skin_install`, `unstable_status`, `player_render_get`, `perf_get`, `game_reload`, `bds_check` |
+| `docs` | `pack_validate`, `pack_info`, `pack_fix_versions`, `pack_check`, `schema_list`, `schema_get`, `script_api`, `component_docs`, `command_docs`, `molang_docs`, `molang_eval` |
 
 The `docs` tools need no running game.
 
 - `pack_validate`, `pack_info` and `pack_fix_versions` run Mojang's
   [Minecraft Creator Tools](https://github.com/Mojang/minecraft-creator-tools). They need Node 22
   or later. `pack_fix_versions` changes nothing unless `dry_run` is false.
+- `pack_check` reads every JSON and `.mcfunction` file of a pack, a project folder or an
+  `.mcaddon`, and reports each texture, function, loot table, trade table, item, block, entity,
+  model, render controller, animation, sound, particle or pack dependency that exists neither in
+  the add-on nor in vanilla. Each finding has its file, line, column and a rule code such as
+  `texture-missing`. It accepts comments and trailing commas as the game does, and takes the
+  vanilla names from the rockide/schemas release. Names the vanilla lists may lack, such as
+  legacy item names, are warnings rather than errors.
+- `bedrock-mcp check <path>` runs the same check from a shell, for CI. It prints one line per
+  finding (`BP/items/gem.json:7:25: error texture-missing: …`) and exits with 1 when there are
+  errors, 2 when it could not run.
 - `schema_list` and `schema_get` read the JSON schemas of a pinned
   [rockide/schemas](https://github.com/rockide/schemas) release, downloaded once with curl.
 - `molang_eval` evaluates an expression with [MolangJS](https://github.com/JannisX11/MolangJS). It
   does not validate: unknown names count as 0 and malformed syntax gives a number. The reply lists
   the names you did not supply. The game reports real Molang errors in the content log.
+- `script_api` looks up a Script API class, method, property or event (`Entity.applyDamage`,
+  `world.afterEvents.entityDie`), or searches by name with `query`. It returns the signature, each
+  parameter's type and docs, the return type, the errors it throws, the module version and the
+  first version that has it.
+- `component_docs` gives each property of an entity, item, block, biome or particle component
+  with its type, default, range and description, the rockide schema id for `schema_get`, and
+  vanilla files that use it. `command_docs` and `molang_docs` give a command's overloads and what
+  a Molang query returns.
+- These four read Mojang's metadata in the [bedrock-samples](https://github.com/Mojang/bedrock-samples)
+  release that matches the installed game (the newest stable one when the version is unknown, and
+  the reply says so), plus the docs in the matching `@minecraft/*` npm package. Both are
+  downloaded once into the cache.
+
+### Edit, reload, check
+
+After you edit an add-on, `game_reload {packs}` copies each pack over the development folder the
+game already loads it from, matched by manifest uuid. It then runs `/reload all`, waits for the
+world to come back and returns the new errors and warnings. Pass `project` for an rgl project: it
+runs `rgl run` when rgl is installed. A pack the game has never loaded needs one restart first,
+and the tool never adds packs to a world. It works without the Bridge pack. Errors from the
+world's other packs come back grouped separately, so they do not bury yours.
+
+`game_reload`, `bds_check` and `pack_check` report problems as
+`{file, line, column, severity, rule, message, source}`, where `file` starts with `BP/` or `RP/`.
+For the game and BDS, the line comes only from what the game logged, from the field path it
+printed, or from an identifier that appears once in the file; otherwise it stays empty.
 
 ### Prompts
 
@@ -351,6 +393,14 @@ their arguments.
 
 Each action reports `confirmed` and the evidence for it.
 
+While the server plays, it locks your keyboard and mouse out of the game, so a stray key press
+cannot spoil a test. With the WebSocket connected, the action bar shows "bedrock-mcp is playing -
+your input is locked - F9 to take over". Press F9 to get the game back: a running
+`action_sequence` stops and its result says `taken_over: true`, and any other call stops sending
+input with an error that says you took over. The server does not lock again until the next tool
+call. `game_status` shows the lock in `input_lock`, and the game unlocks by itself if the server
+goes away. `BEDROCK_MCP_INPUT_LOCK=0` turns the lock off.
+
 - **The real player (`actor: self`).** The action goes through the agent's input:
   1. The player turns to the target, using the bridge for an exact look or `/tp` with cheats.
   2. The server checks the crosshair.
@@ -374,6 +424,22 @@ Each action reports `confirmed` and the evidence for it.
   before a recording, and before its first run in a newly loaded world (`warm_up: "auto"`). With
   the `player_render` capability, the warm-up checks that the attachable animates and repeats
   once when it does not.
+- **Walking with paths.** `movement_set` with `to` finds a path for the real player: around
+  walls, up one-block steps, down drops of at most 3 blocks, and away from lava and water. It
+  reads blocks with the Bridge pack's `re_mcp:blocks`, or with `testforblock` in a world with
+  cheats, and plans again when the player gets stuck or the target moves. The view turns toward
+  each waypoint in eased mouse steps, so recordings look like a person playing. The reply's
+  `evidence.path` lists the waypoints, length, replans and where the blocks came from.
+- **Fighting.** `fight` takes on the nearest mob by entity id, type or family (default
+  `monster`). With `all: true` it moves on until none is left, the time runs out, or
+  `max_targets` were fought. It walks there along a path, keeps the mob in reach, swings when the
+  mob's hurt immunity wore off, and strafes and sprint-hits in between. Hits and kills come from
+  the Bridge pack's events, or from native health reads in single player without it. The reply
+  lists each mob's swings, hits, misses, kill confirmation and time to kill. With the pack it aims
+  with the pack's `re_mcp:aim`, which prints nothing. Without it, `aim: "tp"` (the default) aims
+  with `/tp`: about 3 in 4 swings hit, but each aim shows "You have been teleported" in chat.
+  `aim: "mouse"` turns with the mouse and prints nothing, but only about 1 in 3 swings hit,
+  because the game's reads of the view and the mob lag behind.
 
 ### Timeline and recordings
 
@@ -561,15 +627,18 @@ new game version. Report security problems privately, as [SECURITY.md](SECURITY.
 - [Coherent Gameface API reference](https://docs.coherent-labs.com/cpp-gameface/api_reference/classes/classcohtml_1_1_view/):
   the order of the Ore UI view's methods.
 - [bedrock-samples](https://github.com/Mojang/bedrock-samples) by Mojang: the vanilla command
-  replies, command syntax and effect ids the Bridge-free fallbacks parse.
+  replies, command syntax and effect ids the Bridge-free fallbacks parse, and the Script API,
+  component, command and Molang metadata `script_api`, `component_docs`, `command_docs` and
+  `molang_docs` read.
+- The `@minecraft/*` npm packages by Mojang (MIT): the Script API docs `script_api` shows.
 - [MolangJS](https://github.com/JannisX11/MolangJS) by JannisX11 (MIT): runs `molang_eval`.
 - [Minecraft Creator Tools](https://github.com/Mojang/minecraft-creator-tools) by Mojang: runs
   `pack_validate`, `pack_info` and `pack_fix_versions`.
 - [rockide/schemas](https://github.com/rockide/schemas) by rockide: the schemas for `schema_list`
-  and `schema_get`.
+  and `schema_get`, and the vanilla names `pack_check` resolves.
 
-The `docs` tools download MolangJS, Creator Tools and the schemas into the server's cache on first
-use; the releases do not bundle them.
+The `docs` tools download MolangJS, Creator Tools, the schemas, the bedrock-samples metadata and
+the `@minecraft/*` packages into the server's cache on first use; the releases do not bundle them.
 
 ## License
 

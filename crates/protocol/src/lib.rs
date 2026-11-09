@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever a request or reply changes shape.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 /// File name of the agent DLL that `cargo build` produces for the agent crate.
 pub const DLL_NAME: &str = "bedrock_agent.dll";
 /// Written by the agent next to its DLL once it listens.
@@ -195,6 +195,13 @@ pub enum Request {
     },
     /// Stop copying frames; the file stays valid.
     FramesStop,
+    /// Lock the player's real keyboard and mouse out of the game, or let them in again. While
+    /// locked the game sees only this client's input, and a real F9 press unlocks and counts
+    /// a take-over. The agent unlocks by itself when the client disconnects. Answers with
+    /// [`Reply::Status`].
+    InputLock {
+        locked: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -216,6 +223,10 @@ pub struct Status {
     /// Real absolute pointer position from the last mouse reading.
     pub pointer: [i64; 2],
     pub pointer_override: bool,
+    /// Whether the player's real input is locked out ([`Request::InputLock`]).
+    pub input_locked: bool,
+    /// Real F9 presses that ended a lock since the agent loaded.
+    pub takeovers: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -836,6 +836,10 @@ mod tests {
             player.selected_slot = Some(read.ok_or_else(|| Error::msg("no unstable layer"))?);
             Ok(player)
         }
+
+        fn native_list(&mut self, _radius: f64, _kind: Option<&str>) -> Result<Vec<Value>> {
+            bail!("no entity list in this test")
+        }
     }
 
     fn fake_keys(

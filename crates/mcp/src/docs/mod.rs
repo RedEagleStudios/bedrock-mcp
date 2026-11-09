@@ -1,11 +1,19 @@
 //! Offline helpers for add-on work that run without the game: Minecraft Creator Tools for
-//! pack checks and fixes, the Bedrock JSON schemas, and Molang evaluation. Creator Tools and
-//! Molang run a JavaScript package through Node.js or Bun as a subprocess; packages and the
-//! schemas are fetched once into this server's cache folder.
+//! pack checks and fixes, reference checks between pack files, the Bedrock JSON schemas,
+//! Molang evaluation, and the Script API, component, command and Molang reference from
+//! Mojang's bedrock-samples metadata. Creator Tools and Molang run a JavaScript package through
+//! Node.js or Bun as a subprocess; packages, schemas and metadata are fetched once into this
+//! server's cache folder.
 
+pub mod check;
+pub mod dts;
+pub mod jsonpos;
+pub mod knowledge;
 pub mod mct;
 pub mod molang;
+pub mod samples;
 pub mod schemas;
+pub mod script_api;
 
 use std::{
     collections::BTreeMap,

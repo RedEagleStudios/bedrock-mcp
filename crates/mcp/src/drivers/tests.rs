@@ -230,6 +230,25 @@ impl Game for Fake {
             .clone()
             .ok_or_else(|| Error::msg("no unstable layer in this game"))
     }
+
+    /// Every entity with native health, as a zombie two blocks south of the origin.
+    fn native_list(&mut self, _radius: f64, _entity_type: Option<&str>) -> Result<Vec<Value>> {
+        let mut script = self.script.lock().unwrap();
+        script.tick += 1;
+        let Some(health) = &script.native else {
+            bail!("no unstable layer in this game");
+        };
+        Ok(health
+            .iter()
+            .map(|(id, [current, max])| {
+                json!({
+                    "id": id, "type": "minecraft:zombie",
+                    "location": {"x": 0.0, "y": 0.0, "z": 2.0},
+                    "health": {"current": current, "max": max},
+                })
+            })
+            .collect())
+    }
 }
 
 /// Steve, the connected player, at the origin; pig -5 three blocks south, `script.gap`
@@ -1389,6 +1408,10 @@ impl Game for Watching<'_> {
     fn abandoned(&mut self) -> bool {
         self.gone_after.is_some_and(|after| self.cursor >= after)
     }
+
+    fn native_list(&mut self, radius: f64, entity_type: Option<&str>) -> Result<Vec<Value>> {
+        self.game.native_list(radius, entity_type)
+    }
 }
 
 /// Queue `args` as a background run; its id and the reply.
@@ -2511,4 +2534,368 @@ fn warm_up_without_the_bridge_reads_natively_and_puts_the_player_back_with_tp() 
     let detail = report["detail"].as_str().unwrap();
     assert!(detail.contains("no unstable layer"), "{detail}");
     assert!(game.inputs.is_empty());
+}
+
+#[test]
+fn fight_targets_parse_as_id_type_or_family() {
+    use fight::Wanted;
+    assert_eq!(
+        Wanted::parse(None).unwrap(),
+        Wanted::Family("monster".into())
+    );
+    assert_eq!(
+        Wanted::parse(Some("-4294967295")).unwrap(),
+        Wanted::Id("-4294967295".into())
+    );
+    assert_eq!(
+        Wanted::parse(Some("minecraft:zombie")).unwrap(),
+        Wanted::Type("minecraft:zombie".into())
+    );
+    assert_eq!(
+        Wanted::parse(Some("undead")).unwrap(),
+        Wanted::Family("undead".into())
+    );
+    assert!(Wanted::parse(Some("zombie,r=99]")).is_err());
+    let one_id = Request::parse("fight", json!({"target": "-7", "all": true})).unwrap();
+    assert!(perform(&mut fake(true, Box::new(|_, _| None)).0, &one_id, SHORT).is_err());
+}
+
+/// Steve at the origin facing south (+z); zombies -1 and -2 straight ahead, 2 and 2.5 blocks
+/// away. Unless `tough`, each key.attack kills the nearest zombie still alive, with the Bridge
+/// pack's entity_hurt by Steve and entity_die.
+fn zombie_pair(tough: bool) -> Fake {
+    let alive = Arc::new(Mutex::new(vec![("-1", 2.0), ("-2", 2.5)]));
+    // Steve looks at the torso of the nearer zombie, where the fight aims.
+    let (_, pitch) = facing([0.0, 1.62, 0.0], [0.0, 1.95 * 0.62, 2.0]);
+    let living = Arc::clone(&alive);
+    let answer: Box<Answer> = Box::new(move |line, _| {
+        let alive = living.lock().unwrap();
+        let entity = |id: &str| {
+            alive
+                .iter()
+                .find(|(alive, _)| *alive == id)
+                .map(|(_, z)| *z)
+        };
+        Some(match line {
+            "re_mcp:state" => json_reply(json!({
+                "name": "Steve", "location": {"x": 0.0, "y": 0.0, "z": 0.0},
+                "yaw": 0.0, "pitch": pitch,
+            })),
+            "querytarget @e[r=24,type=minecraft:zombie]" if !alive.is_empty() => {
+                let list: Vec<Value> = alive
+                    .iter()
+                    .map(|(id, z)| {
+                        json!({
+                            "uniqueId": id, "id": 1, "dimension": 0, "yRot": 0.0,
+                            "position": {"x": 0.0, "y": 0.0, "z": z},
+                        })
+                    })
+                    .collect();
+                json!({"statusCode": 0, "details": Value::from(list).to_string()})
+            }
+            _ if line.starts_with("querytarget @e") => failure("No targets matched selector"),
+            _ if line.starts_with("re_mcp:entity ") => {
+                let id = line.trim_start_matches("re_mcp:entity ").trim_matches('"');
+                match entity(id) {
+                    Some(z) => json_reply(json!({
+                        "id": id, "type": "minecraft:zombie",
+                        "location": {"x": 0.0, "y": 0.0, "z": z},
+                        "health": {"current": 20.0, "max": 20.0},
+                    })),
+                    None => failure(&format!(
+                        "re_mcp:entity failed: Error: No loaded entity with id {id}"
+                    )),
+                }
+            }
+            _ if line.starts_with("re_mcp:aim ") || line.starts_with("re_mcp:look ") => {
+                json_reply(json!({"write": 1}))
+            }
+            _ => return None,
+        })
+    });
+    let (mut game, _) = fake(true, answer);
+    game.react = Box::new(move |request, script| {
+        if tough || request.press != ["key.attack"] {
+            return;
+        }
+        let mut alive = alive.lock().unwrap();
+        if alive.is_empty() {
+            return;
+        }
+        let (id, _) = alive.remove(0);
+        let entity = json!({"id": id, "type": "minecraft:zombie"});
+        script.push(
+            "entity_hurt",
+            json!({"entity": entity, "attacker": {"name": "Steve"}, "damage": 20}),
+        );
+        script.push(
+            "entity_die",
+            json!({"entity": entity, "cause": "entity_attack"}),
+        );
+    });
+    game
+}
+
+fn attacks(game: &Fake) -> usize {
+    game.inputs
+        .iter()
+        .filter(|input| input.press == ["key.attack"])
+        .count()
+}
+
+#[test]
+fn a_fight_takes_the_nearest_mob_first_and_moves_on_until_none_is_left() {
+    let mut game = zombie_pair(false);
+    let request =
+        Request::parse("fight", json!({"target": "minecraft:zombie", "all": true})).unwrap();
+    let outcome = perform(&mut game, &request, SHORT).unwrap();
+    let evidence = &outcome.evidence;
+    assert!(outcome.confirmed, "{evidence} {:?}", outcome.notes);
+    assert_eq!(outcome.source, "bridge");
+    assert_eq!(evidence["ended"], "no_targets_left");
+    assert_eq!(evidence["kills"], 2);
+    let targets = evidence["targets"].as_array().unwrap();
+    assert_eq!(targets[0]["id"], "-1", "{evidence}");
+    assert_eq!(targets[1]["id"], "-2", "{evidence}");
+    for target in targets {
+        assert_eq!(target["hits"], 1, "{target}");
+        assert_eq!(target["misses"], 0, "{target}");
+        assert_eq!(target["kill"]["source"], "bridge", "{target}");
+        assert_eq!(target["kill"]["confirmed"], true, "{target}");
+        assert!(target["time_to_kill_ms"].is_u64(), "{target}");
+    }
+    // The second zombie stood 2.5 blocks away: the swing came with a sprint run-up.
+    assert_eq!(targets[1]["sprint_swings"], 1, "{evidence}");
+    assert_eq!(attacks(&game), 2);
+    // Every key the fight held is let go at the end.
+    let last = game.inputs.last().unwrap().r#move.unwrap();
+    assert_eq!((last.forward, last.strafe), (Some(0.0), Some(0.0)));
+}
+
+#[test]
+fn a_fight_ends_at_max_targets_the_timeout_or_without_mobs() {
+    let mut game = zombie_pair(false);
+    let one = Request::parse("fight", json!({"target": "minecraft:zombie"})).unwrap();
+    let outcome = perform(&mut game, &one, SHORT).unwrap();
+    assert!(outcome.confirmed);
+    assert_eq!(outcome.evidence["ended"], "max_targets");
+    assert_eq!(outcome.evidence["targets"].as_array().unwrap().len(), 1);
+
+    let mut game = zombie_pair(true);
+    let short = Request::parse(
+        "fight",
+        json!({"target": "minecraft:zombie", "all": true, "timeout_ms": 400}),
+    )
+    .unwrap();
+    let outcome = perform(&mut game, &short, SHORT).unwrap();
+    assert!(!outcome.confirmed);
+    assert_eq!(outcome.evidence["ended"], "timeout");
+    assert_eq!(outcome.to_json()["reason"]["class"], "timeout");
+    let first = &outcome.evidence["targets"][0];
+    assert_eq!(first["left"]["class"], "timeout", "{first}");
+    assert_eq!(first["killed"], false);
+    assert!(attacks(&game) >= 1);
+
+    let mut game = zombie_pair(false);
+    let none = Request::parse("fight", json!({"target": "minecraft:skeleton"})).unwrap();
+    let outcome = perform(&mut game, &none, SHORT).unwrap();
+    assert!(!outcome.confirmed);
+    assert_eq!(outcome.to_json()["reason"]["class"], "no_target");
+    assert_eq!(attacks(&game), 0);
+}
+
+/// A game without the Bridge pack whose unstable layer reads Steve at the origin facing
+/// zombie -5 two blocks south; each key.attack takes 8 of its 20 health.
+fn native_zombie() -> Fake {
+    native_zombie_parts().0
+}
+
+/// [`native_zombie`] with the commands it saw.
+fn native_zombie_parts() -> (Fake, Seen) {
+    let (mut game, seen) = fake(
+        false,
+        Box::new(|line, _| line.starts_with("tp @s ").then(|| json!({"statusCode": 0}))),
+    );
+    let mut player = crate::unstable::fake::native_player();
+    let (_, pitch) = facing([0.0, 1.62, 0.0], [0.0, 1.95 * 0.62, 2.0]);
+    player.entity.position = [0.0, 0.0, 0.0];
+    player.entity.rotation = Some([pitch as f32, 0.0]);
+    {
+        let mut script = game.script.lock().unwrap();
+        script.player = Some(player);
+        script.native = Some(HashMap::from([("-5".to_owned(), [20.0, 20.0])]));
+    }
+    game.react = Box::new(|request, script| {
+        if request.press == ["key.attack"]
+            && let Some(health) = script.native.as_mut().and_then(|all| all.get_mut("-5"))
+        {
+            health[0] = (health[0] - 8.0).max(0.0);
+        }
+    });
+    (game, seen)
+}
+
+#[test]
+fn without_the_bridge_a_fight_counts_hits_and_the_kill_from_native_reads() {
+    let mut game = native_zombie();
+    let request =
+        Request::parse("fight", json!({"target": "minecraft:zombie", "all": true})).unwrap();
+    let outcome = perform(&mut game, &request, SHORT).unwrap();
+    let evidence = &outcome.evidence;
+    assert!(outcome.confirmed, "{evidence} {:?}", outcome.notes);
+    assert_eq!(outcome.source, "native");
+    let target = &evidence["targets"][0];
+    assert_eq!(target["swings"], 3, "{target}");
+    assert_eq!(target["hits"], 3, "{target}");
+    assert_eq!(target["kill"]["seen"], "health_zero", "{target}");
+    assert_eq!(evidence["ended"], "no_targets_left");
+}
+
+#[test]
+fn a_fight_step_is_confirmed_and_lists_each_mob_it_fought_in_the_summary() {
+    let mut game = native_zombie();
+    let reply = run_sequence(
+        &mut game,
+        json!({
+            "warm_up": false,
+            "steps": [{"action": "fight", "args": {"target": "minecraft:zombie", "all": true}}],
+        }),
+    )
+    .unwrap();
+    let summary = &reply["summary"];
+    assert_eq!(summary["totals"]["confirmed"], 1, "{reply}");
+    assert_eq!(summary["totals"]["kills"], 1, "{reply}");
+    assert_eq!(summary["totals"]["hits"], 3, "{reply}");
+    let target = &summary["targets"]["-5"];
+    assert_eq!(target["hits"], 3, "{target}");
+    assert_eq!(target["misses"], 0, "{target}");
+    assert_eq!(target["steps"], json!([0]), "{target}");
+    assert_eq!(target["killed_by"]["step"], 0, "{target}");
+    assert_eq!(target["killed_by"]["source"], "native", "{target}");
+    assert_eq!(target["final"]["state"], "dead", "{target}");
+    assert!(
+        reply["failed_steps"].as_array().is_none_or(Vec::is_empty),
+        "{reply}"
+    );
+}
+
+#[test]
+fn an_exact_aim_is_one_mouse_flick_and_a_short_correction_without_a_look_command() {
+    use view::{Camera, Exact};
+    let (mut game, seen) = native_zombie_parts();
+    let mut camera = Camera::measured(7.0);
+    let sent = camera
+        .exact_turn(&mut game, (0.0, 0.0), (30.0, -10.0))
+        .unwrap();
+    assert_eq!(sent, Exact::Sent);
+    let flick = game.inputs.last().unwrap().mouse.unwrap();
+    assert_eq!((flick.x, flick.y), (210.0, -70.0));
+    // Right after the flick a read from before it shows the old view: the flick still counts,
+    // so nothing more goes out for it.
+    camera
+        .exact_turn(&mut game, (0.0, 0.0), (30.0, -10.0))
+        .unwrap();
+    let early = game.inputs.last().unwrap().mouse.unwrap();
+    assert!(early.x.abs() < 1e-9 && early.y.abs() < 1e-9, "{early:?}");
+    // Once reads show it, the game turned only 80% (mouse acceleration, say): the correction
+    // sends the rest from where the read shows the view.
+    thread::sleep(Duration::from_millis(200));
+    camera
+        .exact_turn(&mut game, (24.0, -8.0), (30.0, -10.0))
+        .unwrap();
+    let correction = game.inputs.last().unwrap().mouse.unwrap();
+    assert!((correction.x - 42.0).abs() < 1e-9 && (correction.y + 14.0).abs() < 1e-9);
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("tp "))
+    );
+}
+
+#[test]
+fn a_fight_aims_by_mouse_and_never_teleports_when_the_mouse_turns_the_view() {
+    let (mut game, seen) = native_zombie_parts();
+    // Steve starts facing 70 degrees away from the zombie; the mouse turns him 1 degree per
+    // 7 counts, the way the probe measures it.
+    game.script
+        .lock()
+        .unwrap()
+        .player
+        .as_mut()
+        .unwrap()
+        .entity
+        .rotation = Some([0.0, 70.0]);
+    game.react = Box::new(|request, script| {
+        if let Some(motion) = request.mouse
+            && let Some(player) = script.player.as_mut()
+        {
+            let [pitch, yaw] = player.entity.rotation.unwrap();
+            player.entity.rotation = Some([
+                (pitch + (motion.y / 7.0) as f32).clamp(-90.0, 90.0),
+                yaw + (motion.x / 7.0) as f32,
+            ]);
+        }
+        if request.press == ["key.attack"]
+            && let Some(health) = script.native.as_mut().and_then(|all| all.get_mut("-5"))
+        {
+            health[0] = (health[0] - 8.0).max(0.0);
+        }
+    });
+    let request = Request::parse(
+        "fight",
+        json!({"target": "minecraft:zombie", "all": true, "aim": "mouse"}),
+    )
+    .unwrap();
+    let outcome = perform(&mut game, &request, SHORT).unwrap();
+    assert!(
+        outcome.confirmed,
+        "{} {:?}",
+        outcome.evidence, outcome.notes
+    );
+    assert_eq!(outcome.evidence["look_aims"], 0, "{}", outcome.evidence);
+    assert!(game.inputs.iter().any(|input| input.mouse.is_some()));
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("tp ")),
+        "{:?}",
+        seen.lock().unwrap()
+    );
+}
+
+#[test]
+fn without_the_pack_a_fight_aims_with_tp_by_default_and_says_it_shows_in_chat() {
+    let (mut game, seen) = native_zombie_parts();
+    // Steve faces 70 degrees away: the first due swing turns him with /tp, then clicks.
+    game.script
+        .lock()
+        .unwrap()
+        .player
+        .as_mut()
+        .unwrap()
+        .entity
+        .rotation = Some([0.0, 70.0]);
+    let request =
+        Request::parse("fight", json!({"target": "minecraft:zombie", "all": true})).unwrap();
+    let outcome = perform(&mut game, &request, SHORT).unwrap();
+    assert!(outcome.confirmed, "{}", outcome.evidence);
+    assert!(outcome.evidence["look_aims"].as_u64().unwrap() >= 1);
+    assert_eq!(outcome.evidence["flicks"], 0);
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.starts_with("tp @s ~ ~ ~ ")),
+        "{:?}",
+        seen.lock().unwrap()
+    );
+    assert!(
+        outcome.notes.iter().any(|note| note.contains("chat")),
+        "{:?}",
+        outcome.notes
+    );
 }

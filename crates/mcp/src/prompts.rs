@@ -165,18 +165,18 @@ Report the video path, its length, whether {{target}} died, and any jumps that a
 Find and fix the errors of the pack at {{pack}}, used in the world \"{{world}}\".
 
 1. content_log_read {summary: true}: pack and script errors of this game session, grouped by \
-cause. Keep the returned cursor.
-2. pack_validate {path: \"{{pack}}\"}: the pack's own problems, without the game. Fix errors \
-before warnings.
+cause.
+2. pack_check {path: \"{{pack}}\"} for broken references with file, line and column, and \
+pack_validate {path: \"{{pack}}\"} for Mojang's rules, both without the game. Fix errors before \
+warnings.
 3. worlds_list {}: find \"{{world}}\" and check that its behavior_packs or resource_packs list the \
 pack. A pack with name null is not installed where the game looks.
 4. When the world does not apply the pack: world_leave {} if the game is in that world, then \
 world_packs_set {world: \"{{world}}\", behavior: [...], resource: [...]} with the full lists, \
 then world_open {name: \"{{world}}\"} and automation_connect {}.
-5. After editing the pack while in the world: command_execute {command: \"reload all\"}, which \
-reopens the world and picks up the changes.
-6. content_log_read {since: \"<cursor from step 1>\", summary: true}: only the errors that came \
-after your changes. Repeat 2, 5 and 6 until it is empty.
+5. After editing the pack while in the world: game_reload {packs: [\"{{pack}}\"]}. It copies the \
+pack over the folder the game loads, reopens the world, and returns only the errors that came \
+after the reload, with file and line. Repeat 2 and 5 until it returns none.
 
 Report each error you found, its cause, and the fix.",
     },

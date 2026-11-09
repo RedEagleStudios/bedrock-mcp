@@ -12,7 +12,7 @@
 //! pointer: `GetCursorPos` returns it, and the real cursor's `WM_MOUSEMOVE` and
 //! `WM_MOUSELEAVE` are dropped. The agent assumes menus read the pointer through these window
 //! paths, where the real cursor (often outside the window) would cancel the hover and the
-//! click would land nowhere.
+//! click would land nowhere. The window procedure also applies the input [`lock`].
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -27,10 +27,10 @@ use windows_sys::Win32::{
     },
 };
 
-/// `WM_MOUSELEAVE`, which windows-sys keeps behind another feature.
-const WM_MOUSELEAVE: u32 = 0x02A3;
-
-use crate::{gameinput, iat, keyboard};
+use crate::{
+    gameinput, iat, keyboard,
+    lock::{self, WM_MOUSELEAVE},
+};
 
 /// Set while a client is connected.
 static HELD: AtomicBool = AtomicBool::new(false);
@@ -86,11 +86,17 @@ unsafe extern "system" fn window_proc(
         WM_KILLFOCUS => (true, false),
         _ => (false, false),
     };
-    if let Some((x, y)) = overridden_pointer() {
-        let real_move = message == WM_MOUSEMOVE
-            && (lparam & 0xFFFF, (lparam >> 16) & 0xFFFF) != (x as isize, y as isize);
-        if real_move || message == WM_MOUSELEAVE {
+    // The agent's own messages carry a tag; the game gets them without it.
+    let (lparam, ours) = match lock::untag(lparam) {
+        Some(lparam) => (lparam, true),
+        None => (lparam, false),
+    };
+    if !ours {
+        if overridden_pointer().is_some() && matches!(message, WM_MOUSEMOVE | WM_MOUSELEAVE) {
             return 0;
+        }
+        if let Some(answer) = lock::filter(hwnd, message, wparam, lparam) {
+            return answer;
         }
     }
     if deactivation && HELD.load(Ordering::Acquire) {

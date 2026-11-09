@@ -37,6 +37,62 @@ pub fn tools() -> Vec<Tool> {
             }),
         ),
         tool(
+            Hints::ACT,
+            "Reload edited packs",
+            |s, a| reply(s.game_reload(arguments(a)?)?),
+            json!({
+                "name": "game_reload",
+                "description": concat!(
+                    "Use this after you edit an add-on's files, to apply the edit in the open world and see the errors it caused.\n\n",
+                    "Copies the packs over the development pack folders the game loaded them from (or runs `rgl run` for an rgl project), runs /reload all, ",
+                    "waits for the world to reopen, and maps the content log entries the reload produced to files and lines. ",
+                    "Works without the Bridge pack and never adds packs to a world.\n\n",
+                    "- Each pack matches its folder in development_behavior_packs or development_resource_packs by manifest uuid. ",
+                    "A pack the game has never loaded fails before anything is copied: the game finds new folders only when it starts, so install it once and restart.\n",
+                    "- project runs `rgl run` when rgl is on PATH (up to 300 s, with COM_MOJANG set to the game's data folder when unset); otherwise it copies the project's pack folders as they are and notes that filters did not run.\n",
+                    "- Errors and warnings come from the unstable layer's content_log capability when active, else the content log file. settle_ms after the world is back catches script errors.\n",
+                    "- diagnostics hold the problems in the given packs' files; other groups the rest (other packs in the world, entries naming no file) by cause.\n",
+                    "- line is null when the entry states none and the key or identifier it names is not unique in the file.\n",
+                    "- Needs a world with cheats, as /reload all does.\n\n",
+                    "Returns {reloaded, world_back, synced: [{kind, name, uuid, source, installed, method}], rgl, diagnostics: [{file, line, column, severity, rule, message, source}], ",
+                    "counts {error, warning, info}, other {count, groups}, entries, source, elapsed_ms, notes}: file is BP/... or RP/..., rule a kebab-case code from the log area, ",
+                    "groups are as content_log_read's summary, entries the number of log entries read, source live or file; rgl is {command, output, elapsed_ms} or null."
+                ),
+                "inputSchema": object(json!({
+                    "packs": { "type": "array", "items": { "type": "string" }, "description": "Behavior and resource pack folders you edited; each manifest says which kind" },
+                    "project": { "type": "string", "description": "An rgl project folder (with config.json), instead of packs" },
+                    "timeout_ms": { "type": "integer", "minimum": 1, "description": "Longest wait for the world to reopen (default 90000)" },
+                    "settle_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "description": "Time after the world is back for scripts to run and log (default 3000)" }
+                }), &[])
+            }),
+        ),
+        tool(
+            Hints::READ,
+            "Check packs on a dedicated server",
+            |s, a| reply(s.bds_check(arguments(a)?)?),
+            json!({
+                "name": "bds_check",
+                "description": concat!(
+                    "Use this to check that packs load cleanly without a game client, such as in CI or before adding them to a world.\n\n",
+                    "Starts a Bedrock Dedicated Server (BDS) in a scratch folder with a fresh flat world that applies the packs, ",
+                    "collects the errors and warnings it prints while it loads them and runs their scripts, then stops it and removes the folder.\n\n",
+                    "- Waits for \"Server started.\", then until output is quiet for 2 s (at most 15 s); timeout_ms bounds the whole check.\n",
+                    "- A given pack missing from the server's pack stack is an error with rule pack-not-loaded: BDS can trail the client, so packs needing a newer engine or Script API fail to load.\n",
+                    "- Default server: $BEDROCK_MCP_BDS, else ~/.local/share/bedrock-server/current (%LOCALAPPDATA%\\bedrock-server\\current on Windows); ",
+                    "download from https://www.minecraft.net/en-us/download/server/bedrock.\n",
+                    "- A server that does not start is a normal reply with started false and the log's last lines in notes.\n\n",
+                    "Returns {server {path, version}, started, timed_out, diagnostics, counts, pack_stack, log, elapsed_ms, notes}: ",
+                    "diagnostics are as game_reload gives them, with source bds; log is the server's output, kept after the check."
+                ),
+                "inputSchema": object(json!({
+                    "packs": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Behavior and resource pack folders to load; each manifest says which kind" },
+                    "server": { "type": "string", "description": "The BDS folder (default $BEDROCK_MCP_BDS, else the default server folder)" },
+                    "beta_apis": { "type": "boolean", "description": "Turn on the Beta APIs experiment, for packs that use beta Script API modules (default false)" },
+                    "timeout_ms": { "type": "integer", "minimum": 1, "description": "Longest the whole check may take (default 120000)" }
+                }), &["packs"])
+            }),
+        ),
+        tool(
             Hints::SET,
             "Set log levels",
             |s, a| reply(s.log_filter_set(arguments(a)?)?),

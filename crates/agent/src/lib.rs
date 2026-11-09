@@ -5,9 +5,10 @@
 //! them. It posts key and text messages to the game window and merges
 //! synthetic buttons, motion, wheel and pointer position into every GameInput
 //! mouse reading the game takes. While a client is connected it also keeps
-//! the game active in the background ([`focus`]). It hooks only public
-//! GameInput interfaces, the window procedure and the executable's imports of
-//! user32 focus functions, never game code.
+//! the game active in the background ([`focus`]), and on request locks the
+//! player's real input out ([`lock`]). It hooks only public GameInput
+//! interfaces, the window procedure and the executable's imports of user32
+//! focus functions, never game code.
 //!
 //! The agent serves the [`protocol`] on a loopback port through
 //! [`endpoint`] and writes its endpoint and log next to its DLL.
@@ -19,6 +20,7 @@ mod frames;
 mod gameinput;
 mod iat;
 mod keyboard;
+mod lock;
 mod server;
 
 use std::{ffi::c_void, path::PathBuf};

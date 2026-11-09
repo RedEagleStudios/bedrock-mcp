@@ -6,14 +6,19 @@
 
 mod background;
 mod condition;
+mod fight;
 mod gametest;
 mod input;
 mod native;
+mod path;
 mod refs;
 mod spawn;
 mod summary;
+mod terrain;
 #[cfg(test)]
 mod tests;
+mod view;
+mod walk;
 mod warm;
 
 use std::{
@@ -74,7 +79,7 @@ const SERVICE_SLACK: u64 = 4;
 const DEFAULT_APPROACH_MS: u64 = 5_000;
 
 /// Every action a sequence step can name.
-pub const ACTIONS: [&str; 12] = [
+pub const ACTIONS: [&str; 13] = [
     "item_use",
     "item_use_on",
     "attack",
@@ -83,6 +88,7 @@ pub const ACTIONS: [&str; 12] = [
     "block_place",
     "item_drop",
     "movement_set",
+    "fight",
     "look",
     "hotbar_select",
     "spawn",
@@ -149,6 +155,11 @@ pub trait Game {
     fn native_player(&mut self) -> Result<protocol::unstable::NativePlayer> {
         bail!("this game has no unstable layer")
     }
+    /// Entities around the connected player as the unstable layer's native read sees them,
+    /// nearest first, as entities_list entries (id, type, location, distance, health), of
+    /// type `entity_type` when given; fails with why when it cannot answer. Every game
+    /// implements it, so a wrapper never hides the native read from a fight.
+    fn native_list(&mut self, radius: f64, entity_type: Option<&str>) -> Result<Vec<Value>>;
 }
 
 impl Game for Session {
@@ -218,6 +229,19 @@ impl Game for Session {
 
     fn native_player(&mut self) -> Result<protocol::unstable::NativePlayer> {
         Session::native_player(self, &crate::bridge::Actor::Me)
+    }
+
+    fn native_list(&mut self, radius: f64, entity_type: Option<&str>) -> Result<Vec<Value>> {
+        let mut notes = Vec::new();
+        if !self.native_world(&mut notes) {
+            bail!("{}", notes.join("; "));
+        }
+        let filter = crate::session::world_state::EntityFilter {
+            player: None,
+            radius,
+            entity_type,
+        };
+        Ok(self.native_entities(&filter)?.0)
     }
 }
 
@@ -870,6 +894,7 @@ pub enum Request {
     BlockPlace(BlockPlace),
     ItemDrop(ItemDrop),
     Movement(Movement),
+    Fight(fight::Fight),
     Look(Look),
     Hotbar(HotbarSelect),
     Spawn(spawn::Spawn),
@@ -893,6 +918,7 @@ impl Request {
             "block_place" => Self::BlockPlace(parsed(action, args)?),
             "item_drop" => Self::ItemDrop(parsed(action, args)?),
             "movement_set" => Self::Movement(parsed(action, args)?),
+            "fight" => Self::Fight(parsed(action, args)?),
             "look" => Self::Look(parsed(action, args)?),
             "hotbar_select" => Self::Hotbar(parsed(action, args)?),
             "spawn" => Self::Spawn(parsed(action, args)?),
@@ -913,6 +939,7 @@ impl Request {
             Self::BlockPlace(args) => &args.actor,
             Self::ItemDrop(args) => &args.actor,
             Self::Movement(args) => &args.actor,
+            Self::Fight(args) => &args.actor,
             Self::Look(args) => &args.actor,
             Self::Hotbar(args) => &args.actor,
             Self::Spawn(args) => &args.actor,
@@ -929,6 +956,9 @@ impl Request {
                 to: Some(Destination::Entity(id)),
                 ..
             }) => Some(id),
+            Self::Fight(args) => args.target.as_deref().filter(|target| {
+                matches!(fight::Wanted::parse(Some(target)), Ok(fight::Wanted::Id(_)))
+            }),
             _ => None,
         }
     }
@@ -953,6 +983,7 @@ impl Request {
             Self::BlockBreak(_) => Controls::VIEW | Controls::ATTACK,
             Self::Movement(args) if args.to.is_some() => Controls::VIEW | Controls::MOVE,
             Self::Movement(_) => Controls::MOVE,
+            Self::Fight(_) => Controls::VIEW | Controls::MOVE | Controls::ATTACK,
             // A slot change ends a held use, so it waits for one.
             Self::Hotbar(_) => Controls::USE,
             Self::ItemDrop(_) | Self::Spawn(_) | Self::Stop(_) => Controls::NONE,
@@ -1032,6 +1063,8 @@ pub trait Driver {
     fn drop_item(&self, game: &mut dyn Game, quantity: Quantity) -> Result<Outcome>;
     /// Release held keys and stop moving, using and breaking.
     fn stop(&self, game: &mut dyn Game) -> Result<Outcome>;
+    /// Fight the nearest matching mobs; see [`fight`].
+    fn fight(&self, game: &mut dyn Game, args: &fight::Fight) -> Result<Outcome>;
 }
 
 /// When and how a step's action starts: `defer` hands back actions that still run as
@@ -1116,6 +1149,7 @@ fn perform_with(
             args.check()?;
             driver.move_to(game, args)
         }
+        Request::Fight(args) => driver.fight(game, args),
         Request::Look(args) => driver.look(game, &args.aim()?),
         Request::Hotbar(args) => driver.select_slot(game, args.slot),
         Request::Spawn(args) => spawn::spawn(game, args, confirm),
@@ -1759,6 +1793,7 @@ impl Run {
         match self.cause {
             "stop_when" => STOPPED_SKIP.to_owned(),
             "disconnect" => "The MCP client disconnected before this step started.".to_owned(),
+            "take_over" => "The player took over with F9 before this step started.".to_owned(),
             cause => format!("{cause} ended the sequence before this step started."),
         }
     }
@@ -1768,6 +1803,10 @@ impl Run {
         match self.cause {
             "disconnect" => {
                 "The MCP client disconnected while this ran; its actor got the stop action."
+                    .to_owned()
+            }
+            "take_over" => {
+                "The player took over with F9 while this ran; its actor got the stop action."
                     .to_owned()
             }
             cause => {
@@ -1794,9 +1833,9 @@ impl Run {
         true
     }
 
-    /// Whether the sequence must stop: sequence_stop asked for it, the client went away,
-    /// enough steps failed, or stop_when holds (checked at most once a tick unless `now`). A
-    /// condition that cannot be checked stops the sequence too.
+    /// Whether the sequence must stop: sequence_stop asked for it, the player took over, the
+    /// client went away, enough steps failed, or stop_when holds (checked at most once a tick
+    /// unless `now`). A condition that cannot be checked stops the sequence too.
     fn stopping(&mut self, game: &mut dyn Game, now: bool) -> bool {
         if self.stopped.is_some() {
             return true;
@@ -1805,6 +1844,7 @@ impl Run {
         let at_ms = self.elapsed_ms();
         let requested = match &self.running.log {
             _ if game.abandoned() => Some("disconnect"),
+            Some(log) if log.borrow().taken_over => Some("take_over"),
             Some(log) if log.borrow().stop_requested => Some("sequence_stop"),
             _ => None,
         };

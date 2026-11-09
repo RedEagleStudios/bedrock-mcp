@@ -97,8 +97,9 @@ fn key_lparam(scan: u8, extended: bool) -> isize {
     1 | (isize::from(scan) << 16) | (isize::from(extended) << 24)
 }
 
+/// Post a message tagged as the agent's, so the input lock lets it through.
 fn post(message: u32, wparam: usize, lparam: isize) -> bool {
-    unsafe { PostMessageW(window(), message, wparam, lparam) != 0 }
+    unsafe { PostMessageW(window(), message, wparam, crate::lock::tag(lparam)) != 0 }
 }
 
 /// The screen position of client position `x`, `y` in the game window.

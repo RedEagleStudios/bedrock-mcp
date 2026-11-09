@@ -23,8 +23,10 @@ mod inject;
 mod input;
 mod install;
 mod keys;
+mod log_diagnostics;
 mod nbt;
 mod oreui;
+mod pack_sync;
 mod packs;
 mod platform;
 mod prompts;
@@ -47,12 +49,14 @@ use std::{io, sync::Arc};
 
 fn main() {
     // `bedrock-mcp docs` prints the tool reference (docs/tools.md) and exits; `--version` prints
-    // the version the installer compares against.
+    // the version the installer compares against; `check <path>` runs pack_check for scripts
+    // and CI.
     match std::env::args().nth(1).as_deref() {
         Some("docs") => {
             print!("{}", tools::reference());
             return;
         }
+        Some("check") => std::process::exit(docs::check::cli(std::env::args_os().nth(2))),
         Some("--version") => {
             println!("bedrock-mcp {}", env!("CARGO_PKG_VERSION"));
             return;

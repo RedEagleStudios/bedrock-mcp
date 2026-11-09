@@ -95,6 +95,8 @@ mod tests {
             gameinput_versions: Vec::new(),
             pointer: [0, 0],
             pointer_override: false,
+            input_locked: false,
+            takeovers: 0,
         }
     }
 }

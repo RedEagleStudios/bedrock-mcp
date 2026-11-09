@@ -1,4 +1,4 @@
-//! GameTests on a Bedrock Dedicated Server, with no client.
+//! Bedrock Dedicated Server runs with no client: GameTests and pack load checks.
 
 use std::{path::PathBuf, time::Duration};
 
@@ -13,6 +13,21 @@ use crate::{
     gametest::Run,
     worlds,
 };
+
+/// How long a load check may take unless told otherwise.
+const DEFAULT_CHECK_TIMEOUT_MS: u64 = 120_000;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckArgs {
+    packs: Vec<PathBuf>,
+    #[serde(default)]
+    server: Option<PathBuf>,
+    #[serde(default)]
+    beta_apis: bool,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,6 +59,18 @@ pub struct ServerTestArgs {
 }
 
 impl Session {
+    pub(crate) fn bds_check(&mut self, args: CheckArgs) -> Result<Value> {
+        let agent_dir = self.install.agent_dir();
+        bds::check(&bds::CheckOptions {
+            server: args.server.unwrap_or_else(bds::default_server),
+            run_dir: agent_dir.join(format!("bds-check-{}", std::process::id())),
+            log_path: agent_dir.join("bds-check.log"),
+            packs: args.packs,
+            beta_apis: args.beta_apis,
+            timeout: Duration::from_millis(args.timeout_ms.unwrap_or(DEFAULT_CHECK_TIMEOUT_MS)),
+        })
+    }
+
     pub(crate) fn gametest_server(&mut self, args: ServerTestArgs) -> Result<Value> {
         let world = match &args.world {
             Some(key) => {

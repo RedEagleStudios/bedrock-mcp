@@ -237,6 +237,8 @@ fn stalled_frames_time_out_on_the_injected_clock() {
                 gameinput_versions: vec![],
                 pointer: [0, 0],
                 pointer_override: false,
+                input_locked: false,
+                takeovers: 0,
             }));
     }
     let clock = FakeClock::new();

@@ -21,9 +21,11 @@ import {
 	CustomCommandParamType,
 	CustomCommandResult,
 	CustomCommandStatus,
+	Dimension,
 	EntityComponentTypes,
 	EquipmentSlot,
 	GameMode,
+	LiquidType,
 	Player,
 	StartupEvent,
 	system,
@@ -41,6 +43,8 @@ const EVENT_LIMIT = 128;
 const DEFAULT_RADIUS = 32;
 const RAYCAST_DISTANCE = 64;
 const CONTAINER_PAGE = 27;
+/** The most cells one `re_mcp:blocks` reads. */
+const BLOCK_GRID_LIMIT = 4096;
 
 type Parameter = { name: string; type: CustomCommandParamType };
 type Vector = { x: number; y: number; z: number };
@@ -267,6 +271,36 @@ function aim(target: Player, parsed: Map<string, string>) {
 		point: describe.vector(point),
 		...sight(target, direction(requested.yaw, requested.pitch)),
 	};
+}
+
+/** One letter per cell for the server's walking pathfinder: `.` open (air, or a block that flowing water washes away, which has no collision), `#` solid, `t` a fence or wall (too high to step onto), `w` water, `l` lava, `?` not loaded. */
+function cellLetter(dimension: Dimension, location: Vector): string {
+	const block = describe.attempt(() => dimension.getBlock(location));
+	if (!block?.isValid) return "?";
+	if (block.isAir) return ".";
+	if (block.isLiquid) return block.typeId.includes("lava") ? "l" : "w";
+	if (describe.attempt(() => block.canBeDestroyedByLiquidSpread(LiquidType.Water))) return ".";
+	return /fence|_wall$/.test(block.typeId) ? "t" : "#";
+}
+
+/** The cells of the box at `x,y,z` spanning `dx,dy,dz` in the caller's dimension, x fastest, then z, then y. */
+function blockGrid(dimension: Dimension, parsed: Map<string, string>) {
+	const origin = vectorOption(parsed, "x", "y", "z");
+	const size = vectorOption(parsed, "dx", "dy", "dz");
+	if (!origin || !size) throw new Error("Give x, y, z and dx, dy, dz");
+	const [sx, sy, sz] = [size.x, size.y, size.z].map(Math.floor);
+	if (Math.min(sx, sy, sz) < 1 || sx * sy * sz > BLOCK_GRID_LIMIT) {
+		throw new Error(`The box must hold 1 to ${BLOCK_GRID_LIMIT} cells`);
+	}
+	let cells = "";
+	for (let y = 0; y < sy; y++) {
+		for (let z = 0; z < sz; z++) {
+			for (let x = 0; x < sx; x++) {
+				cells += cellLetter(dimension, { x: origin.x + x, y: origin.y + y, z: origin.z + z });
+			}
+		}
+	}
+	return { origin: describe.vector(origin), size: [sx, sy, sz], cells };
 }
 
 /** Apply each `player_set` option on its own; a refused option lands in `rejected` with the game's reason. */
@@ -511,6 +545,16 @@ system.beforeEvents.startup.subscribe((event) => {
 				})),
 			});
 		},
+	);
+	register(
+		event,
+		"blocks",
+		"a grid of walkable, solid and liquid cells for paths",
+		[
+			{ name: "spec", type: CustomCommandParamType.String },
+		],
+		[],
+		(caller, spec: string) => ok(blockGrid(caller.dimension, options(spec))),
 	);
 	register(
 		event,

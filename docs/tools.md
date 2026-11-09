@@ -42,6 +42,7 @@ Every tool the server offers, grouped by toolset. `BEDROCK_MCP_TOOLSETS` (comma-
 |  | [`block_place`](#block_place) | Place block |
 |  | [`item_drop`](#item_drop) | Drop items |
 |  | [`movement_set`](#movement_set) | Move |
+|  | [`fight`](#fight) | Fight mobs |
 |  | [`entity_spawn`](#entity_spawn) | Spawn entity |
 |  | [`action_sequence`](#action_sequence) | Run action sequence |
 |  | [`sequence_status`](#sequence_status) | Watch a sequence run |
@@ -71,6 +72,8 @@ Every tool the server offers, grouped by toolset. `BEDROCK_MCP_TOOLSETS` (comma-
 |  | [`camera_get`](#camera_get) | Read the live camera |
 |  | [`camera_set`](#camera_set) | Set the camera perspective |
 | [dev](#dev-toolset) | [`content_log_read`](#content_log_read) | Read the content log |
+|  | [`game_reload`](#game_reload) | Reload edited packs |
+|  | [`bds_check`](#bds_check) | Check packs on a dedicated server |
 |  | [`log_levels_set`](#log_levels_set) | Set log levels |
 |  | [`log_levels_get`](#log_levels_get) | Get log levels |
 |  | [`packs_global`](#packs_global) | Global resource packs |
@@ -82,10 +85,15 @@ Every tool the server offers, grouped by toolset. `BEDROCK_MCP_TOOLSETS` (comma-
 |  | [`player_render_get`](#player_render_get) | Read the player's animation state |
 |  | [`perf_get`](#perf_get) | Read frame timings |
 | [docs](#docs-toolset) | [`pack_validate`](#pack_validate) | Validate a pack |
+|  | [`pack_check`](#pack_check) | Check pack references |
 |  | [`pack_info`](#pack_info) | Pack information |
 |  | [`pack_fix_versions`](#pack_fix_versions) | Update pack versions |
 |  | [`schema_list`](#schema_list) | List Bedrock schemas |
 |  | [`schema_get`](#schema_get) | Get a Bedrock schema |
+|  | [`script_api`](#script_api) | Script API reference |
+|  | [`component_docs`](#component_docs) | Component reference |
+|  | [`command_docs`](#command_docs) | Command reference |
+|  | [`molang_docs`](#molang_docs) | Molang reference |
 |  | [`molang_eval`](#molang_eval) | Evaluate Molang |
 
 ## game toolset
@@ -188,8 +196,9 @@ It reads the game, agent, window, WebSocket, world and unstable layer in one cal
 - in_world comes from the screens capability, else the WebSocket; null, with notes, when neither tells.
 - world needs the WebSocket: with the Bridge pack, re_mcp:state (the player), re_mcp:world and nearby re_mcp:entities; without it, eye, yaw, pitch (bisected), dimension, nearby actors, time_of_day and game_time. Without the pack, in a world with the unstable layer's world_state capability, world.player adds the native player_get fields (source native), even without the WebSocket.
 - On generic Linux desktops the window size is at scale 1 and workspace is null.
+- input_lock is {enabled, locked, taken_over, banner, note}: while the server plays, the player's real keyboard and mouse are locked out of the game; taken_over is true once the player pressed F9 since the last lock started. BEDROCK_MCP_INPUT_LOCK=0 turns it off.
 
-Returns {running, pid, crash_debugger, agent, window, in_world: {value, source, notes}, content_log_errors, attention, warnings, websocket, world, camera, recording, timeline, held, unstable}. window.desktop is hyprland, generic or windows; unstable is null without the layer, else {capabilities, screens (scene stacks, bottom first), camera}.
+Returns {running, pid, crash_debugger, agent, window, in_world: {value, source, notes}, content_log_errors, attention, warnings, websocket, world, camera, recording, timeline, held, input_lock, unstable}. window.desktop is hyprland, generic or windows; unstable is null without the layer, else {capabilities, screens (scene stacks, bottom first), camera}.
 
 No arguments.
 
@@ -738,7 +747,7 @@ Returns {actor, driver, confirmed, source, evidence, tick, notes, reason}. notes
 
 **Attack** · acts (repeating it acts again)
 
-Use this for one melee swing at an entity or at the crosshair. For a fight until the target dies, use action_sequence with a repeated attack step.
+Use this for one melee swing at an entity or at the crosshair. To fight mobs until they die, use fight.
 
 With entity_id, actor self turns toward the entity's middle and clicks only when the crosshair shows it within reach. With the Bridge pack the turn is one re_mcp:aim write, which also reads the crosshair.
 
@@ -853,13 +862,17 @@ Returns {actor, driver, confirmed, source, evidence, tick, notes, reason}. notes
 
 Use this to walk to a position or an entity (to), or to press movement keys (forward, strafe, jump, sneak, sprint).
 
-With to, actor self holds forward and re-aims at the target every 150 ms until within arrival_radius blocks horizontally or timeout_ms passes. It walks straight and does not find paths. A simulated player path-finds with navigateToLocation or navigateToEntity.
+With to, actor self finds a path around walls and walks it as a player would: the view turns toward each waypoint in eased mouse steps, key.forward walks, and key.jump climbs one-block ledges, until it is within arrival_radius blocks horizontally or timeout_ms passes. A simulated player path-finds with navigateToLocation or navigateToEntity.
 
-- With the Bridge pack, actor self stops at the edge of water or lava ahead (evidence.liquid) unless avoid_water is false; a player already in water walks on.
+- Actor self's path: A* over block cells within 32 blocks of the start, bounded in cells searched and time per plan. It steps up one block, drops at most 3, never enters lava, and enters water only with avoid_water: false.
+- Blocks come from the Bridge pack's re_mcp:blocks, else testforblock in a world with cheats (unknown blocks count as solid), else the player walks straight at the target. evidence.path.source says which (bridge, commands or none), and notes say why it fell back.
+- It plans again when an entity target moves, and when the player leaves the path or gets stuck (after one jump); 6 such retries at most. reason blocked says when no path leads on, with a path that ends at the spot nearest the target.
+- The view turns by mouse motion, measured on the first turn. When mouse motion does not turn it, the view turns with exact looks, which snap, and a note says so.
+- Walking straight with the Bridge pack, actor self stops at the edge of water or lava ahead (evidence.liquid) unless avoid_water is false; a player already in water walks on.
 - A simulated player must also be within arrival_radius plus 1 block vertically (evidence.vertical_gap is the target's height above it). It gives up at once when navigation finds no path, and after 2 s without moving.
 - Manual keys stay down for duration_ms, or without it until a later call sets them to 0 or false, or the stop action.
 - A simulated player moves with moveRelative and cannot sneak.
-- evidence holds the start and end positions.
+- evidence holds the start and end positions. For actor self evidence.path is {source, waypoints (block positions where the path turns or changes level), length, reached, bound (radius, nodes or time when a search stopped early), expanded, replans, loads, camera {turns: mouse or look, counts_per_degree}}.
 - driver is input for actor self: synthetic input that aims with the Bridge pack's exact look, or /tp in a world with cheats, and checks the crosshair before clicking. It is gametest for a simulated player: SimulatedPlayer calls through the GameTest pack.
 - confirmed is true only when the game showed the result: a Bridge pack event by this actor (evidence.event, with its tick), a legacy WebSocket event without the pack, or a readback (source names it).
 
@@ -869,7 +882,7 @@ Returns {actor, driver, confirmed, source, evidence, tick, notes, reason}. notes
 | --- | --- | --- |
 | `actor` | string | "self" (default) plays the player who ran /connect with synthetic input; the name of a GameTest simulated player calls its SimulatedPlayer methods instead |
 | `arrival_radius` | number, at least 0 | Horizontal distance that counts as arrived (default 1) |
-| `avoid_water` | boolean | Stop at water or lava instead of walking in (default true; actor self with the Bridge pack) |
+| `avoid_water` | boolean | Keep actor self out of water: paths go around it, and straight walking with the Bridge pack stops at its edge (default true) |
 | `duration_ms` | integer, 0 to 300000 | Hold the manual keys this long, then release them |
 | `forward` | number | Positive walks forward, negative back, 0 releases both keys |
 | `jump` | boolean | Hold (true) or release (false) key.jump, also while walking with to; a simulated player jumps once, and ignores it with to |
@@ -878,6 +891,33 @@ Returns {actor, driver, confirmed, source, evidence, tick, notes, reason}. notes
 | `strafe` | number | Positive steps right, negative left, 0 releases both keys |
 | `timeout_ms` | integer, 0 to 300000 | Give up walking to the target after this long (default 20000) |
 | `to` | object {x, y, z} or string | Where to walk: a position {x, y, z} or an entity id to follow |
+
+### fight
+
+**Fight mobs** · acts (repeating it acts again)
+
+Use this to fight hostile mobs with the connected player until they die, such as clearing the zombies a test spawned.
+
+Picks the nearest mob that matches target, walks to it along a path as movement_set does, and fights it as a player would: keeps it within reach and steps back when it comes closer than 1.5 blocks, follows it with the view in eased steps, swings once its hurt immunity wore off (every 550 ms) and the view is on its torso, strafes side to side between swings and opens with a sprint hit for knockback. With all it moves on to the next mob until none is left within radius, timeout_ms passes or max_targets were fought.
+
+- target is an entity id, a type id with a colon (minecraft:zombie) or a family (monster, the default). Families match with querytarget, which needs cheats; types use the native entity list in single player when the unstable layer runs, else querytarget.
+- A swing goes out when the read view is within the mob's body angle of its torso (0.62 of its height, from a per-type height). With the Bridge pack, a view still off 300 ms after the swing was due is aimed with its re_mcp:aim, which shows nothing in chat, and the click follows at once (aim is ignored). Without the pack the view is aimed as aim says.
+- Without the pack aim chooses how. tp (default) is accurate: /tp turns the view on the server and the click follows a tenth of a second later, and in clean test fights about 3 in 4 swings hit, but each /tp prints a line in chat. mouse is quiet, for silent recordings: a mouse flick at the measured sensitivity, then the reads are watched until they show it (at most twice the measured read lag, 400 ms) and one correction flick follows if needed; the reads lag 150 to 300 ms, so only about 1 in 3 swings hit (evidence.flicks; a click still off the aim counts as off_aim). evidence.look_aims counts pack and /tp aims.
+- With the Bridge pack, hits are its entity_hurt events by the player and kills its entity_die events (source bridge). Without it, the unstable layer's native health reads count a drop after a swing as a hit, and health 0 or the mob gone as a kill (source native). Without either, hits are null and a mob gone from querytarget counts as killed but unconfirmed (source command), since a despawn looks the same.
+- A mob that no path reaches is left with left.class blocked, and the fight moves on to the next.
+- Plays actor self only; for a simulated player use attack steps in action_sequence.
+
+Returns {actor, driver, confirmed, source, evidence, notes, reason}. confirmed is true when at least one mob was fought and every one fought died with a confirmed kill. evidence is {targets: [{id, type, swings, sprint_swings, hits, misses, no_damage (native: swings whose read saw no drop), off_aim, phases_ms {walking, aiming (a swing due, waiting for the aim), cadence, ticks}, killed, kill {confirmed, source, seen, tick}, time_to_kill_ms, left {class, detail}}], kills, ended (no_targets_left, max_targets or timeout), elapsed_ms, flicks, look_aims, stray_hits (hits on other mobs than the one fought), read_lag_ms, path (as movement_set's)}. reason {class, detail} is no_target, blocked, timeout or no_event.
+
+| Argument | Type | Description |
+| --- | --- | --- |
+| `actor` | string | Only "self" (default): the player who ran /connect |
+| `aim` | `"tp"` \\| `"mouse"` | Without the Bridge pack: tp (default) aims with /tp, accurate but each prints a chat line; mouse aims with mouse flicks, quiet but less accurate. Ignored with the pack |
+| `all` | boolean | Fight every matching mob in turn, nearest first, not only one (default false) |
+| `max_targets` | integer, 1 to 64 | The most mobs to fight (default 1, or 16 with all) |
+| `radius` | number, 0 to 64 | How far around the player to look for mobs, in blocks (default 24) |
+| `target` | string | An entity id, a type id with a colon such as minecraft:zombie, or a family such as monster (default monster) |
+| `timeout_ms` | integer, 0 to 300000 | End the fight after this long (default 60000) |
 
 ### entity_spawn
 
@@ -916,12 +956,12 @@ Use this for any play-test with more than one action, such as a whole fight.
 
 Runs up to 64 steps in one call (spawn mobs, switch items, aim, attack until a target dies, record), so the server reacts within a tick and a recording holds no waits between tool calls. Each step names an action and its args as the matching tool takes them.
 
-- **Actions:** spawn takes entity_spawn's arguments and about 10 ticks. hotbar_select takes slot (0 to 8). look takes position, entity_id or block (with face). stop releases held keys and stops a simulated player, which keeps looking at a look target until its next look.
+- **Actions:** spawn takes entity_spawn's arguments and about 10 ticks. hotbar_select takes slot (0 to 8). look takes position, entity_id or block (with face). fight takes the fight tool's arguments and runs until its mobs died or its timeout_ms. stop releases held keys and stops a simulated player, which keeps looking at a look target until its next look.
 - **References:** after a spawn step with as: "A", args and conditions may write "$A" (or "$spawn:<index>") for its id; an event contains of just "$A" matches that id, so {event: {name: "entity_die", contains: "$A"}} waits for its death. An item_use step targets the entity its actor last looked at, attacked or walked to.
 - **Without the Bridge pack:** the sequence reads the health of every spawned or targeted entity natively about once a tick (unstable world_state capability, single player) and adds each drop as an entity_hurt event and each death (health 0, or gone after a read showed it, which also covers a despawn) as an entity_die event, source native and the read's server tick. Event conditions, killed_by and final use them as they use the pack's. If the native read is unavailable, notes say so and kills go unseen.
 - **Timing:** use at_tick (game ticks by the Bridge pack's clock, 50 ms each without it) or after_ms throughout; a step without either runs right after the one before. Steps that would start after timeout_ms are skipped.
 - **Sending ahead:** with at_tick and the pack, a simulated player's step goes a second ahead and runs on its exact tick, so tick 0 is a second after the call. An actor self step that aims (attack or entity_interact with entity_id, item_use_on, block_place, block_break with location) starts up to 8 ticks early and clicks on its tick; a look starts 3 ticks early; neither before the player's previous step or the spawn step it names. started_tick is when a step ran, or when actor self's input went out.
-- **Overlap:** a step finishes (event, walk, mining, hold) while later steps start. An actor self step waits only for a control an earlier one still holds: a timed item_use hold keeps key.use and the view (hotbar_select waits too), block_break keeps key.attack and the view, movement_set keeps the view and movement keys with to or approach, and the movement keys with duration_ms. notes list actions that started more than a tick late.
+- **Overlap:** a step finishes (event, walk, mining, hold) while later steps start. An actor self step waits only for a control an earlier one still holds: a timed item_use hold keeps key.use and the view (hotbar_select waits too), block_break keeps key.attack and the view, movement_set keeps the view and movement keys with to or approach, and the movement keys with duration_ms, and fight keeps the view, the movement keys and key.attack. notes list actions that started more than a tick late.
 - **Conditions:** a step waits for wait_for (up to wait_ms), runs only if its if holds, then runs once or as repeat says; such a step is not sent ahead and holds back later steps. Conditions are checked once a tick; event conditions count events since the previous step started (since the call for the first step and stop_when).
 - **Repeat:** until and stop_when are checked right before each run, so no run starts after until held. A run whose target already died or went away is skipped with reason target_dead, is not a failure, and ends the repeat.
 - **Stopping:** stop_when ends the run as soon as it holds or cannot be checked, as fail_fast, max_failures, sequence_stop and a client disconnect do: steps not started are skipped, running ones are marked interrupted, and every actor that acted gets the stop action (actor self releases every held control).
@@ -930,11 +970,12 @@ Runs up to 64 steps in one call (spawn mobs, switch items, aim, attack until a t
 - **Recording:** record starts after the warm-up; the step clock starts with it, each step marks a chapter, and it stops once the last step settled.
 - **Blocking:** a call answers when the run ends, or after blocking_limit_ms with {run_id, state: running, cursor, note} while the run goes on; fetch the result with sequence_status, which keeps the last 8 runs. background: true answers at once with {run_id, clock, planned: [{index, action, at_tick or after_ms}]}.
 - **During a run:** other calls are answered between steps, and a slow one such as frame_capture delays the next step. One run goes at a time. Refused meanwhile: another action_sequence; the actor tools, look_at, hotbar_select and player_set for an actor it plays; input_send, ui_click and chat_send when it plays actor self.
+- **Input lock:** while a run plays actor self, the player's real keyboard and mouse are locked out of the game and the action bar says so (with the WebSocket). F9 gives the player the game back: the run stops as sequence_stop stops it, with stopped.by take_over and taken_over: true, and nothing locks again until the next tool call.
 - **Hits:** an attack or interaction hits when confirmed on the target. A throw or shot hits when its projectile hit the target, or the target was hurt before the next use aimed at it. An action that never went out counts only in reasons; one after the target died counts as after_death.
 - **Reasons:** the action reasons plus target_dead and interrupted; projectile_in_flight also covers an empty hand right after using an item now gone from the inventory, such as a returning throw.
 - **verbose: true** adds clock (tick or wall), confirmed (a count), the whole summary (first_tick, last_tick, hits_mean), warm_up and actors_stopped, and steps: each step's times, wait_for and if details, outcome (the action tool's reply) or error or skipped, expect {met, confirmed, holds}, and for a repeat its runs and what ended them.
 
-Returns {run_id, state, timing {wall_ms, first_tick, last_tick}, summary, failed_steps, stopped, failures, error, warm_up {done, detail}, recording, notes}:
+Returns {run_id, state, timing {wall_ms, first_tick, last_tick}, summary, failed_steps, stopped, failures, error, warm_up {done, detail}, recording, taken_over, notes}:
 - summary.targets maps each entity id to {label, spawned_by, type, steps, hits, misses, after_death, killed_by, final, reasons}. killed_by is {step, run, tick, cause, killer, source} of the last action before its entity_die (source bridge or native), or null; final.state is dead, alive, gone or unknown.
 - summary.totals counts actions, confirmed, unconfirmed, hits, misses, kills and reasons.
 - failed_steps has one line per step that was skipped, failed, went unconfirmed or missed its expect: {index, action, target, ok: false, confirmed, reason, error}, where reason is an action reason, expect_unmet or skipped. A repeat gives {runs, failed, reasons} instead.
@@ -1513,6 +1554,52 @@ Returns {entries, cursor, source, notes}, plus dropped (entries the live buffer 
 | `summary` | boolean | Group entries by cause instead of listing them (default false) |
 | `wait_ms` | integer, at least 0 | Wait up to this long for at least one matching entry (default 0, no wait) |
 
+### game_reload
+
+**Reload edited packs** · acts (repeating it acts again)
+
+Use this after you edit an add-on's files, to apply the edit in the open world and see the errors it caused.
+
+Copies the packs over the development pack folders the game loaded them from (or runs `rgl run` for an rgl project), runs /reload all, waits for the world to reopen, and maps the content log entries the reload produced to files and lines. Works without the Bridge pack and never adds packs to a world.
+
+- Each pack matches its folder in development_behavior_packs or development_resource_packs by manifest uuid. A pack the game has never loaded fails before anything is copied: the game finds new folders only when it starts, so install it once and restart.
+- project runs `rgl run` when rgl is on PATH (up to 300 s, with COM_MOJANG set to the game's data folder when unset); otherwise it copies the project's pack folders as they are and notes that filters did not run.
+- Errors and warnings come from the unstable layer's content_log capability when active, else the content log file. settle_ms after the world is back catches script errors.
+- diagnostics hold the problems in the given packs' files; other groups the rest (other packs in the world, entries naming no file) by cause.
+- line is null when the entry states none and the key or identifier it names is not unique in the file.
+- Needs a world with cheats, as /reload all does.
+
+Returns {reloaded, world_back, synced: [{kind, name, uuid, source, installed, method}], rgl, diagnostics: [{file, line, column, severity, rule, message, source}], counts {error, warning, info}, other {count, groups}, entries, source, elapsed_ms, notes}: file is BP/... or RP/..., rule a kebab-case code from the log area, groups are as content_log_read's summary, entries the number of log entries read, source live or file; rgl is {command, output, elapsed_ms} or null.
+
+| Argument | Type | Description |
+| --- | --- | --- |
+| `packs` | array of string | Behavior and resource pack folders you edited; each manifest says which kind |
+| `project` | string | An rgl project folder (with config.json), instead of packs |
+| `settle_ms` | integer, 0 to 30000 | Time after the world is back for scripts to run and log (default 3000) |
+| `timeout_ms` | integer, at least 1 | Longest wait for the world to reopen (default 90000) |
+
+### bds_check
+
+**Check packs on a dedicated server** · reads only
+
+Use this to check that packs load cleanly without a game client, such as in CI or before adding them to a world.
+
+Starts a Bedrock Dedicated Server (BDS) in a scratch folder with a fresh flat world that applies the packs, collects the errors and warnings it prints while it loads them and runs their scripts, then stops it and removes the folder.
+
+- Waits for "Server started.", then until output is quiet for 2 s (at most 15 s); timeout_ms bounds the whole check.
+- A given pack missing from the server's pack stack is an error with rule pack-not-loaded: BDS can trail the client, so packs needing a newer engine or Script API fail to load.
+- Default server: $BEDROCK_MCP_BDS, else ~/.local/share/bedrock-server/current (%LOCALAPPDATA%\bedrock-server\current on Windows); download from https://www.minecraft.net/en-us/download/server/bedrock.
+- A server that does not start is a normal reply with started false and the log's last lines in notes.
+
+Returns {server {path, version}, started, timed_out, diagnostics, counts, pack_stack, log, elapsed_ms, notes}: diagnostics are as game_reload gives them, with source bds; log is the server's output, kept after the check.
+
+| Argument | Type | Description |
+| --- | --- | --- |
+| `packs` (required) | array of string | Behavior and resource pack folders to load; each manifest says which kind |
+| `beta_apis` | boolean | Turn on the Beta APIs experiment, for packs that use beta Script API modules (default false) |
+| `server` | string | The BDS folder (default $BEDROCK_MCP_BDS, else the default server folder) |
+| `timeout_ms` | integer, at least 1 | Longest the whole check may take (default 120000) |
+
 ### log_levels_set
 
 **Set log levels** · sets state (repeating it changes nothing more)
@@ -1705,6 +1792,7 @@ Checks a behavior or resource pack, or a folder of packs, with Minecraft Creator
 - suite main runs the common checks, addon the packaging checks, all every check.
 - exit_code is 0 for no problems, 3 errors, 4 failed checks, 5 an internal MCT error; findings are kept for each.
 - Some checks download vanilla data.
+- pack_check finds broken references between files, with their line and column.
 
 Returns {source: "mct", ok, exit_code, findings: [{severity, rule, file, message, data?}], counts, projects, mct_version, notes}: severity is error, warning, recommendation or internal_error, rule an id such as CPACKICON, file relative to the pack.
 
@@ -1714,6 +1802,28 @@ Returns {source: "mct", ok, exit_code, findings: [{severity, rule, file, message
 | `exclude` | array of string | Rule ids to skip, as in a finding's rule |
 | `suite` | `"main"` \\| `"addon"` \\| `"all"` | Which checks to run (default main) |
 | `warn_only` | boolean | Make MCT exit 0 even with errors; findings are still reported (default false) |
+
+### pack_check
+
+**Check pack references** · reads only, may reach other machines
+
+Use this to find broken references between pack files without the game, after you add or rename a texture, function, loot table, item, block, entity, model, animation or sound.
+
+Reads every .json and .mcfunction file of the behavior and resource packs in path and checks that each name a file refers to exists in the add-on or in vanilla. Vanilla names come from rockide/schemas 0.1.4, downloaded once into the cache with curl. Nothing runs and nothing is changed.
+
+- Finds packs by their manifest.json, up to four folders deep; a .mcpack, .mcaddon, .mcworld or .zip is read in place.
+- Reads comments and trailing commas as the game does; a file it cannot parse is a json-syntax error.
+- Rules: texture-missing, loot-table-missing, trade-table-missing, function-missing, item-missing, block-missing, entity-missing, geometry-missing, render-controller-missing, animation-missing, sound-missing, particle-missing, manifest-dependency-missing, json-syntax.
+- Commands are read in .mcfunction files, tick.json, run_command and queue_command events, and the / lines of behavior animations and controllers: function, summon, give, setblock, fill, playsound and particle.
+- References into a pack type path lacks (textures without a resource pack) are skipped and named in notes.
+- Without vanilla data, names that may be vanilla are warnings, not errors.
+- Does not check schema fields or Molang; pack_validate and the content log cover those.
+
+Returns {source: "references", ok, diagnostics: [{file, line, column, severity, rule, message, source}], counts, files_scanned, packs: [{label, kind, name, folder}], vanilla, truncated?, notes}: file starts with its pack's label (BP or RP), ok is false when there are errors, vanilla names the identifier data used or is null, truncated means only the first 1000 diagnostics are listed.
+
+| Argument | Type | Description |
+| --- | --- | --- |
+| `path` (required) | string | A pack or project folder, or a .mcpack, .mcaddon, .mcworld or .zip file |
 
 ### pack_info
 
@@ -1786,6 +1896,80 @@ Returns {source: "rockide", version, id, schema, refs, kind?, component?, format
 | `format_version` | string | The file's format_version, e.g. 1.21.0, with kind or a document id (default: the newest in format_versions) |
 | `id` | string | A document id from schema_list (bp/entities) or a schema id from refs (bedrock/server/entity/legacy/components/health); not with kind |
 | `kind` | string | A document id, the same without its pack (entities, attachables), its title or its schema folder (server/entity); not with id |
+
+### script_api
+
+**Script API reference** · reads only, may reach other machines
+
+Use this to look up a Script API class, method, property or event before you write or fix add-on scripts.
+
+Reads Mojang's script module metadata from the bedrock-samples release that matches the installed game and joins it with the JSDoc of the npm package for the same module version. symbol gives one declaration in full; query lists matching names. Both are downloaded once into the cache.
+
+- The release follows the installed game (a hotfix uses its release line); when the game version is unknown or has no release, it uses the newest stable release and says so in notes.
+- since is the oldest stable version of the module's major version that has the symbol; beta_only means only the beta module has it, which needs the Beta APIs experiment.
+- An unknown symbol returns found: false with close matches. Without npm the reply has no descriptions and a note says why.
+- Fails when curl is missing or the download fails and nothing is cached; the error names the URL.
+
+Returns {source: {repository, release, game_version, docs}, module, module_version, channel, found, symbol, kind, signature, description, parameters: [{name, type, optional, default, min, max, description}], returns: {type, description}, throws, privileges, since, beta_only?, members?, examples?, matches?, notes}: throws names the error classes; privileges are the execution modes allowed to call it (default alone means not in read-only or early execution).
+
+| Argument | Type | Description |
+| --- | --- | --- |
+| `module` | string | The script module, with or without @minecraft/ (default: @minecraft/server) |
+| `query` | string | Text to find in symbol names, ignoring case, e.g. entityDie; not with symbol |
+| `symbol` | string | A declaration: Entity, Entity.applyDamage, world.afterEvents.entityDie or system.runTimeout; not with query |
+| `version` | string | stable (default: the newest stable version in the release), beta, or an exact module version such as 2.4.0 |
+
+### component_docs
+
+**Component reference** · reads only, may reach other machines
+
+Use this to learn what a component's properties mean, with their types and defaults, before you write it into a pack file.
+
+Reads the component's schema from Mojang's JSON schema metadata in the bedrock-samples release that matches the installed game: each property's type, default, range and description. It also gives the rockide schema id for schema_get and the vanilla files that use the component.
+
+- Searches every kind unless kind is given; a component of several kinds, such as minecraft:tags, needs kind.
+- When Mojang's metadata gives a component no properties (minecraft:health), they come from the rockide schema; properties_source and a note say so.
+- An unknown component returns found: false with close names.
+
+Returns {source, found, kind, component, description, format_version, forms, properties: [{name, type, default, description, minimum, maximum, values, fields}], required?, schema_file, rockide_schema, vanilla_examples: {count, files}, properties_source?, matches?, notes}: forms are the value shapes the component accepts (boolean, object, ...); fields are the keys of an object property; schema_file and vanilla files are paths in the release.
+
+| Argument | Type | Description |
+| --- | --- | --- |
+| `component` (required) | string | The component, with or without the minecraft: prefix (minecraft:behavior.tempt or health) |
+| `kind` | `"entity"` \\| `"item"` \\| `"block"` \\| `"biome"` \\| `"client_biome"` \\| `"particle"` | The file type the component belongs to (default: every kind) |
+
+### command_docs
+
+**Command reference** · reads only, may reach other machines
+
+Use this to check a slash command's syntax before you run it or put it in a function file.
+
+Reads the command list in Mojang's metadata from the bedrock-samples release that matches the installed game: each overload's parameters, their types and the values of enum parameters.
+
+- Takes aliases and a leading slash; an unknown name returns found: false with commands whose name or description match.
+- Enum parameters with more than 60 values (every item or block id) give value_count instead of values.
+
+Returns {source, found, name, description, aliases, permission_level, requires_cheats, overloads: [{usage, params: [{name, type, optional, values?, value_count?}]}], matches?, notes}: usage puts required parameters in <> and optional ones in [].
+
+| Argument | Type | Description |
+| --- | --- | --- |
+| `name` (required) | string | The command, e.g. give or /gamemode |
+
+### molang_docs
+
+**Molang reference** · reads only, may reach other machines
+
+Use this to check what a Molang query or math function returns and which arguments it takes.
+
+Reads the Molang query and math function list in Mojang's metadata from the bedrock-samples release that matches the installed game.
+
+- Takes query.x, q.x, math.x or a bare name; an unknown name returns found: false with entries whose name or description match.
+
+Returns {source, found, kind, name, description, return_type, min_args, max_args, version_ranges, matches?, notes}: version_ranges give the first (and last) game version a query works in.
+
+| Argument | Type | Description |
+| --- | --- | --- |
+| `name` (required) | string | The query or function, e.g. query.is_sneaking, q.health or math.lerp |
 
 ### molang_eval
 

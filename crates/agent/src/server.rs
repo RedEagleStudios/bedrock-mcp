@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use endpoint::{Service, log};
 use protocol::{CrashKind, PROTOCOL_VERSION, Reply, Request, Status};
 
-use crate::{focus, frames, gameinput, keyboard};
+use crate::{focus, frames, gameinput, keyboard, lock};
 
 pub struct Agent;
 
@@ -26,6 +26,8 @@ fn status() -> Status {
             synthetic.real_y.load(Ordering::Relaxed),
         ],
         pointer_override: synthetic.pointer_active.load(Ordering::Relaxed),
+        input_locked: lock::locked(),
+        takeovers: lock::takeovers(),
     }
 }
 
@@ -144,6 +146,10 @@ fn run(request: Request) -> Reply {
             frames::stop();
             Reply::Ok
         }
+        Request::InputLock { locked } => {
+            lock::set(locked);
+            Reply::Status(status())
+        }
     }
 }
 
@@ -179,6 +185,8 @@ impl Service for Agent {
     }
 
     fn release(&self) {
+        // The player gets their input back whenever the client goes away.
+        lock::set(false);
         frames::stop();
         keyboard::release_all();
         gameinput::release();

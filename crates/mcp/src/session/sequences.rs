@@ -19,6 +19,9 @@ use crate::{
     world::World,
 };
 
+/// The longest wait at a run's wait point between input lock checks.
+const LOCK_SLICE: Duration = Duration::from_millis(250);
+
 impl Session {
     /// Queue a sequence. With `background` return its run id and plan at once; otherwise
     /// park the call ([`Error::Waiting`]): the server calls again with the same arguments,
@@ -203,13 +206,24 @@ impl Game for Pumped<'_> {
     }
 
     fn input(&mut self, request: InputRequest) -> Result<()> {
+        self.session.check_lock();
         Game::input(self.session, request)
     }
 
     fn pause(&mut self, duration: Duration) {
-        self.session.background.nested = true;
-        self.pump.pump(self.session, duration);
-        self.session.background.nested = false;
+        // Long waits come in slices, so an F9 take-over stops the run within a slice.
+        let mut left = duration;
+        loop {
+            self.session.check_lock();
+            let slice = left.min(LOCK_SLICE);
+            self.session.background.nested = true;
+            self.pump.pump(self.session, slice);
+            self.session.background.nested = false;
+            left -= slice;
+            if left.is_zero() {
+                return;
+            }
+        }
     }
 
     fn abandoned(&mut self) -> bool {
@@ -254,5 +268,9 @@ impl Game for Pumped<'_> {
 
     fn native_player(&mut self) -> Result<protocol::unstable::NativePlayer> {
         Game::native_player(self.session)
+    }
+
+    fn native_list(&mut self, radius: f64, entity_type: Option<&str>) -> Result<Vec<Value>> {
+        Game::native_list(self.session, radius, entity_type)
     }
 }

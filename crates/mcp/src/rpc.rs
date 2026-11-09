@@ -41,20 +41,23 @@ reopen it.
 action_sequence runs one before a recording or its first run in a newly loaded world (warm_up \
 \"auto\"). Both report it.
 3. Act with the actions tools and check each reply's confirmed and notes. For timed play \
-(combos, attacks, throws), put the steps in one action_sequence instead of separate calls. For \
+(combos, attacks, throws), put the steps in one action_sequence instead of separate calls. \
+movement_set {to} walks a path around walls; fight {target, all} melees mobs until they die. For \
 long sequences pass background: true, watch with sequence_status, abort with sequence_stop. Use \
 ui_click for menu and form buttons. When actions stop confirming, read game_status.attention \
-(death or disconnect screens).
+(death or disconnect screens). The player's own input is locked out while the server plays; \
+taken_over: true, or an error saying the player pressed F9, means the user took over, so ask \
+before you play on.
 4. camera_set picks first or third person. Read errors with content_log_read {summary: true}. \
 To record a timed fight, pass record: true to its action_sequence; otherwise use video_start \
 {pause_on_idle_ms: 500} / video_stop, which pauses the video while no tool call runs, so your \
 thinking between calls stays out of it. Set everything up first and look at results afterwards.
-5. After you edit the add-on's files, command_execute {command: \"reload all\"} applies the \
-edit: the game reopens the world by itself with behavior and resource packs, scripts and models \
-reloaded, so never leave and reopen the world for it. Then wait_until in_world before the next \
-tool. Plain /reload reloads only scripts and functions. A pack folder the game has never seen \
-still needs a game restart.
-GameTests without a client: gametest_server.";
+5. After you edit the add-on's files, game_reload {packs: [...]} (or {project} for an rgl \
+project) copies them over the folders the game loads, runs /reload all, waits for the world to \
+reopen and returns the new errors with file and line. Never leave and reopen the world for an \
+edit. pack_check {path} finds broken references without the game. A pack folder the game has \
+never seen still needs a game restart.
+GameTests without a client: gametest_server; a load check without a client: bds_check.";
 
 /// One item of a tool result.
 #[derive(Clone, Debug, PartialEq)]

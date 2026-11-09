@@ -147,6 +147,24 @@ fn actions(steps: &Value) -> Vec<Action<'_>> {
     found
 }
 
+/// The mobs fight steps fought: each with its step's index, as the fight's evidence lists it.
+fn fought(steps: &Value) -> Vec<(u64, &Value)> {
+    steps
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry["action"] == "fight")
+        .flat_map(|entry| {
+            let step = entry["index"].as_u64().unwrap_or(0);
+            entry["outcome"]["evidence"]["targets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(move |target| (step, target))
+        })
+        .collect()
+}
+
 /// The ids an event names as `field.id`.
 fn id_of<'a>(event: &'a HubEvent, field: &str) -> Option<&'a str> {
     event.body[field]["id"].as_str()
@@ -240,6 +258,15 @@ pub fn summarize(
             ids.push(target);
         }
     }
+    // A fight step finds its mobs as it goes: each one it fought is a target too.
+    let fought = fought(steps);
+    for (_, target) in &fought {
+        if let Some(id) = target["id"].as_str()
+            && !ids.contains(&id)
+        {
+            ids.push(id);
+        }
+    }
     let events = if ids.is_empty() {
         Vec::new()
     } else {
@@ -282,7 +309,20 @@ pub fn summarize(
             .partition(|action| {
                 died.is_none_or(|died| action.tick().is_none_or(|acted| acted <= died))
             });
-        let mut hits = 0;
+        let fights: Vec<&(u64, &Value)> = fought
+            .iter()
+            .filter(|(_, target)| target["id"].as_str() == Some(*id))
+            .collect();
+        // A fight counts its own hits and misses: its swings are not separate actions.
+        let fight_hits: u64 = fights
+            .iter()
+            .filter_map(|(_, target)| target["hits"].as_u64())
+            .sum();
+        let mut hits = fight_hits;
+        let fight_misses: u64 = fights
+            .iter()
+            .filter_map(|(_, target)| target["misses"].as_u64())
+            .sum();
         let mut reasons = Map::new();
         for (at, action) in strikes.iter().enumerate() {
             let hit = match action.action {
@@ -318,34 +358,52 @@ pub fn summarize(
                 count(&mut reasons, class);
             }
         }
-        let killed_by = death.map(|event| {
-            let killer = event.tick.and_then(|tick| {
-                strikes
-                    .iter()
-                    .rev()
-                    .find(|action| action.tick().is_some_and(|acted| acted <= tick))
-            });
-            let mut killed = match killer {
-                Some(action) => action.place(event.tick),
-                None => json!({ "tick": event.tick }),
-            };
-            killed["cause"] = event.body["cause"].clone();
-            killed["killer"] = event.body["killer"]["name"].clone();
-            killed["source"] = event.source.as_str().into();
-            killed
-        });
+        let fight_kill = fights
+            .iter()
+            .find(|(_, target)| target["kill"]["confirmed"] == true);
+        let killed_by = match (death, fight_kill) {
+            (Some(event), _) => {
+                let killer = event.tick.and_then(|tick| {
+                    strikes
+                        .iter()
+                        .rev()
+                        .find(|action| action.tick().is_some_and(|acted| acted <= tick))
+                });
+                let mut killed = match (killer, fight_kill.or(fights.last())) {
+                    (Some(action), _) => action.place(event.tick),
+                    (None, Some((step, _))) => json!({ "step": step, "tick": event.tick }),
+                    (None, None) => json!({ "tick": event.tick }),
+                };
+                killed["cause"] = event.body["cause"].clone();
+                killed["killer"] = event.body["killer"]["name"].clone();
+                killed["source"] = event.source.as_str().into();
+                Some(killed)
+            }
+            (None, Some((step, target))) => Some(json!({
+                "step": step,
+                "tick": target["kill"]["tick"],
+                "cause": null,
+                "killer": null,
+                "source": target["kill"]["source"],
+            })),
+            (None, None) => None,
+        };
+        let killed = killed_by.is_some();
         let spawn = spawned.iter().find(|spawn| spawn.id == *id);
         let kind = spawn
             .map(|spawn| spawn.kind.clone())
             .filter(|kind| !kind.is_null())
             .or_else(|| death.map(|event| event.body["entity"]["type"].clone()))
+            .or_else(|| fights.first().map(|(_, target)| target["type"].clone()))
             .unwrap_or(Value::Null);
         let mut steps: Vec<u64> = aimed.iter().map(|action| action.step).collect();
+        steps.extend(fights.iter().map(|(step, _)| *step));
+        steps.sort_unstable();
         steps.dedup();
+        let misses = strikes.len() as u64 - (hits - fight_hits) + fight_misses;
         totals["hits"] = (totals["hits"].as_u64().unwrap_or(0) + hits).into();
-        totals["misses"] =
-            (totals["misses"].as_u64().unwrap_or(0) + strikes.len() as u64 - hits).into();
-        if death.is_some() {
+        totals["misses"] = (totals["misses"].as_u64().unwrap_or(0) + misses).into();
+        if killed {
             totals["kills"] = (totals["kills"].as_u64().unwrap_or(0) + 1).into();
         }
         targets.insert(
@@ -356,10 +414,10 @@ pub fn summarize(
                 "type": kind,
                 "steps": steps,
                 "hits": hits,
-                "misses": strikes.len() as u64 - hits,
+                "misses": misses,
                 "after_death": after_death.len(),
                 "killed_by": killed_by,
-                "final": final_state(world, id, death.is_some(), &ends),
+                "final": final_state(world, id, killed, &ends),
                 "reasons": reasons,
             }),
         );

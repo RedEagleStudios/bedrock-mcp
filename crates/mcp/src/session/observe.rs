@@ -502,6 +502,7 @@ impl Session {
             "recording": self.recording.as_mut().map(|recording| recording.status(clock)),
             "timeline": self.timeline.path(),
             "held": self.controller.held(),
+            "input_lock": self.lock.report(),
             "unstable": unstable,
         })
     }
@@ -524,7 +525,7 @@ impl Session {
     }
 
     /// The cursor after every complete entry written so far.
-    fn content_log_end(&self) -> Result<Option<Cursor>> {
+    pub(super) fn content_log_end(&self) -> Result<Option<Cursor>> {
         let logs = game_files::content_logs(&self.install.prefix);
         let mut cursor = None;
         loop {

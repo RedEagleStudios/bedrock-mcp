@@ -8,7 +8,48 @@ use crate::{content_log::Cursor, error::Result};
 /// The game's `LogLevel` and `LogArea` numbers with known names, from LeviLamina's public
 /// `LogLevel.h` and `LogArea.h`. Entries keep their numbers either way.
 const LEVEL_NAMES: &[(u32, &str)] = &[(0, "verbose"), (1, "info"), (2, "warning"), (3, "error")];
-const AREA_NAMES: &[(u32, &str)] = &[(28, "Scripting")];
+const AREA_NAMES: &[(u32, &str)] = &[
+    (0, "Actor"),
+    (1, "Addon"),
+    (2, "Ai"),
+    (3, "Animation"),
+    (4, "AutomatedTests"),
+    (5, "BiomeRegistry"),
+    (6, "Blocks"),
+    (7, "Camera"),
+    (8, "Cereal"),
+    (9, "Commands"),
+    (10, "Components"),
+    (11, "Dialogue"),
+    (12, "Effects"),
+    (13, "Entity"),
+    (14, "FeatureRegistry"),
+    (15, "Geometry"),
+    (16, "Item"),
+    (17, "Json"),
+    (18, "LevelStorage"),
+    (19, "Lighting"),
+    (20, "Localization"),
+    (21, "Log"),
+    (22, "Molang"),
+    (23, "Messaging"),
+    (24, "Persona"),
+    (25, "Recipes"),
+    (26, "Rendering"),
+    (27, "RuntimeCamera"),
+    (28, "Scripting"),
+    (29, "Sound"),
+    (30, "Store"),
+    (31, "Structure"),
+    (32, "Texture"),
+    (33, "Ui"),
+    (34, "Volumes"),
+    (35, "LootTable"),
+    (36, "Packs"),
+    (37, "DisconnectionScreen"),
+    (38, "VoxelShape"),
+    (39, "Dimensions"),
+];
 
 const LIVE_PREFIX: &str = "live@";
 
@@ -37,6 +78,11 @@ impl LogCursor {
 
 pub fn live_cursor(seq: u64) -> String {
     format!("{LIVE_PREFIX}{seq}")
+}
+
+/// The name of a live entry's area, when known.
+pub fn area_name(area: u32) -> Option<&'static str> {
+    name(AREA_NAMES, area)
 }
 
 pub fn entry_json(entry: &LogEntry) -> Value {

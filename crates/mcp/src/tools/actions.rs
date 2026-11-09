@@ -92,7 +92,7 @@ const ITEM_USE_ON: &str = concat!(
 );
 
 const ATTACK: &str = concat!(
-    "Use this for one melee swing at an entity or at the crosshair. For a fight until the target dies, use action_sequence with a repeated attack step.\n",
+    "Use this for one melee swing at an entity or at the crosshair. To fight mobs until they die, use fight.\n",
     "\n",
     "With entity_id, actor self turns toward the entity's middle and clicks only when the crosshair shows it within reach. With the Bridge pack the turn is one re_mcp:aim write, which also reads the crosshair.\n",
     "\n",
@@ -145,13 +145,32 @@ const ITEM_DROP: &str = concat!(
 const MOVEMENT_SET: &str = concat!(
     "Use this to walk to a position or an entity (to), or to press movement keys (forward, strafe, jump, sneak, sprint).\n",
     "\n",
-    "With to, actor self holds forward and re-aims at the target every 150 ms until within arrival_radius blocks horizontally or timeout_ms passes. It walks straight and does not find paths. A simulated player path-finds with navigateToLocation or navigateToEntity.\n",
+    "With to, actor self finds a path around walls and walks it as a player would: the view turns toward each waypoint in eased mouse steps, key.forward walks, and key.jump climbs one-block ledges, until it is within arrival_radius blocks horizontally or timeout_ms passes. A simulated player path-finds with navigateToLocation or navigateToEntity.\n",
     "\n",
-    "- With the Bridge pack, actor self stops at the edge of water or lava ahead (evidence.liquid) unless avoid_water is false; a player already in water walks on.\n",
+    "- Actor self's path: A* over block cells within 32 blocks of the start, bounded in cells searched and time per plan. It steps up one block, drops at most 3, never enters lava, and enters water only with avoid_water: false.\n",
+    "- Blocks come from the Bridge pack's re_mcp:blocks, else testforblock in a world with cheats (unknown blocks count as solid), else the player walks straight at the target. evidence.path.source says which (bridge, commands or none), and notes say why it fell back.\n",
+    "- It plans again when an entity target moves, and when the player leaves the path or gets stuck (after one jump); 6 such retries at most. reason blocked says when no path leads on, with a path that ends at the spot nearest the target.\n",
+    "- The view turns by mouse motion, measured on the first turn. When mouse motion does not turn it, the view turns with exact looks, which snap, and a note says so.\n",
+    "- Walking straight with the Bridge pack, actor self stops at the edge of water or lava ahead (evidence.liquid) unless avoid_water is false; a player already in water walks on.\n",
     "- A simulated player must also be within arrival_radius plus 1 block vertically (evidence.vertical_gap is the target's height above it). It gives up at once when navigation finds no path, and after 2 s without moving.\n",
     "- Manual keys stay down for duration_ms, or without it until a later call sets them to 0 or false, or the stop action.\n",
     "- A simulated player moves with moveRelative and cannot sneak.\n",
-    "- evidence holds the start and end positions.\n"
+    "- evidence holds the start and end positions. For actor self evidence.path is {source, waypoints (block positions where the path turns or changes level), length, reached, bound (radius, nodes or time when a search stopped early), expanded, replans, loads, camera {turns: mouse or look, counts_per_degree}}.\n"
+);
+
+const FIGHT: &str = concat!(
+    "Use this to fight hostile mobs with the connected player until they die, such as clearing the zombies a test spawned.\n",
+    "\n",
+    "Picks the nearest mob that matches target, walks to it along a path as movement_set does, and fights it as a player would: keeps it within reach and steps back when it comes closer than 1.5 blocks, follows it with the view in eased steps, swings once its hurt immunity wore off (every 550 ms) and the view is on its torso, strafes side to side between swings and opens with a sprint hit for knockback. With all it moves on to the next mob until none is left within radius, timeout_ms passes or max_targets were fought.\n",
+    "\n",
+    "- target is an entity id, a type id with a colon (minecraft:zombie) or a family (monster, the default). Families match with querytarget, which needs cheats; types use the native entity list in single player when the unstable layer runs, else querytarget.\n",
+    "- A swing goes out when the read view is within the mob's body angle of its torso (0.62 of its height, from a per-type height). With the Bridge pack, a view still off 300 ms after the swing was due is aimed with its re_mcp:aim, which shows nothing in chat, and the click follows at once (aim is ignored). Without the pack the view is aimed as aim says.\n",
+    "- Without the pack aim chooses how. tp (default) is accurate: /tp turns the view on the server and the click follows a tenth of a second later, and in clean test fights about 3 in 4 swings hit, but each /tp prints a line in chat. mouse is quiet, for silent recordings: a mouse flick at the measured sensitivity, then the reads are watched until they show it (at most twice the measured read lag, 400 ms) and one correction flick follows if needed; the reads lag 150 to 300 ms, so only about 1 in 3 swings hit (evidence.flicks; a click still off the aim counts as off_aim). evidence.look_aims counts pack and /tp aims.\n",
+    "- With the Bridge pack, hits are its entity_hurt events by the player and kills its entity_die events (source bridge). Without it, the unstable layer's native health reads count a drop after a swing as a hit, and health 0 or the mob gone as a kill (source native). Without either, hits are null and a mob gone from querytarget counts as killed but unconfirmed (source command), since a despawn looks the same.\n",
+    "- A mob that no path reaches is left with left.class blocked, and the fight moves on to the next.\n",
+    "- Plays actor self only; for a simulated player use attack steps in action_sequence.\n",
+    "\n",
+    "Returns {actor, driver, confirmed, source, evidence, notes, reason}. confirmed is true when at least one mob was fought and every one fought died with a confirmed kill. evidence is {targets: [{id, type, swings, sprint_swings, hits, misses, no_damage (native: swings whose read saw no drop), off_aim, phases_ms {walking, aiming (a swing due, waiting for the aim), cadence, ticks}, killed, kill {confirmed, source, seen, tick}, time_to_kill_ms, left {class, detail}}], kills, ended (no_targets_left, max_targets or timeout), elapsed_ms, flicks, look_aims, stray_hits (hits on other mobs than the one fought), read_lag_ms, path (as movement_set's)}. reason {class, detail} is no_target, blocked, timeout or no_event."
 );
 
 const ENTITY_SPAWN: &str = concat!(
@@ -171,12 +190,12 @@ const ACTION_SEQUENCE: &str = concat!(
     "\n",
     "Runs up to 64 steps in one call (spawn mobs, switch items, aim, attack until a target dies, record), so the server reacts within a tick and a recording holds no waits between tool calls. Each step names an action and its args as the matching tool takes them.\n",
     "\n",
-    "- **Actions:** spawn takes entity_spawn's arguments and about 10 ticks. hotbar_select takes slot (0 to 8). look takes position, entity_id or block (with face). stop releases held keys and stops a simulated player, which keeps looking at a look target until its next look.\n",
+    "- **Actions:** spawn takes entity_spawn's arguments and about 10 ticks. hotbar_select takes slot (0 to 8). look takes position, entity_id or block (with face). fight takes the fight tool's arguments and runs until its mobs died or its timeout_ms. stop releases held keys and stops a simulated player, which keeps looking at a look target until its next look.\n",
     "- **References:** after a spawn step with as: \"A\", args and conditions may write \"$A\" (or \"$spawn:<index>\") for its id; an event contains of just \"$A\" matches that id, so {event: {name: \"entity_die\", contains: \"$A\"}} waits for its death. An item_use step targets the entity its actor last looked at, attacked or walked to.\n",
     "- **Without the Bridge pack:** the sequence reads the health of every spawned or targeted entity natively about once a tick (unstable world_state capability, single player) and adds each drop as an entity_hurt event and each death (health 0, or gone after a read showed it, which also covers a despawn) as an entity_die event, source native and the read's server tick. Event conditions, killed_by and final use them as they use the pack's. If the native read is unavailable, notes say so and kills go unseen.\n",
     "- **Timing:** use at_tick (game ticks by the Bridge pack's clock, 50 ms each without it) or after_ms throughout; a step without either runs right after the one before. Steps that would start after timeout_ms are skipped.\n",
     "- **Sending ahead:** with at_tick and the pack, a simulated player's step goes a second ahead and runs on its exact tick, so tick 0 is a second after the call. An actor self step that aims (attack or entity_interact with entity_id, item_use_on, block_place, block_break with location) starts up to 8 ticks early and clicks on its tick; a look starts 3 ticks early; neither before the player's previous step or the spawn step it names. started_tick is when a step ran, or when actor self's input went out.\n",
-    "- **Overlap:** a step finishes (event, walk, mining, hold) while later steps start. An actor self step waits only for a control an earlier one still holds: a timed item_use hold keeps key.use and the view (hotbar_select waits too), block_break keeps key.attack and the view, movement_set keeps the view and movement keys with to or approach, and the movement keys with duration_ms. notes list actions that started more than a tick late.\n",
+    "- **Overlap:** a step finishes (event, walk, mining, hold) while later steps start. An actor self step waits only for a control an earlier one still holds: a timed item_use hold keeps key.use and the view (hotbar_select waits too), block_break keeps key.attack and the view, movement_set keeps the view and movement keys with to or approach, and the movement keys with duration_ms, and fight keeps the view, the movement keys and key.attack. notes list actions that started more than a tick late.\n",
     "- **Conditions:** a step waits for wait_for (up to wait_ms), runs only if its if holds, then runs once or as repeat says; such a step is not sent ahead and holds back later steps. Conditions are checked once a tick; event conditions count events since the previous step started (since the call for the first step and stop_when).\n",
     "- **Repeat:** until and stop_when are checked right before each run, so no run starts after until held. A run whose target already died or went away is skipped with reason target_dead, is not a failure, and ends the repeat.\n",
     "- **Stopping:** stop_when ends the run as soon as it holds or cannot be checked, as fail_fast, max_failures, sequence_stop and a client disconnect do: steps not started are skipped, running ones are marked interrupted, and every actor that acted gets the stop action (actor self releases every held control).\n",
@@ -185,11 +204,12 @@ const ACTION_SEQUENCE: &str = concat!(
     "- **Recording:** record starts after the warm-up; the step clock starts with it, each step marks a chapter, and it stops once the last step settled.\n",
     "- **Blocking:** a call answers when the run ends, or after blocking_limit_ms with {run_id, state: running, cursor, note} while the run goes on; fetch the result with sequence_status, which keeps the last 8 runs. background: true answers at once with {run_id, clock, planned: [{index, action, at_tick or after_ms}]}.\n",
     "- **During a run:** other calls are answered between steps, and a slow one such as frame_capture delays the next step. One run goes at a time. Refused meanwhile: another action_sequence; the actor tools, look_at, hotbar_select and player_set for an actor it plays; input_send, ui_click and chat_send when it plays actor self.\n",
+    "- **Input lock:** while a run plays actor self, the player's real keyboard and mouse are locked out of the game and the action bar says so (with the WebSocket). F9 gives the player the game back: the run stops as sequence_stop stops it, with stopped.by take_over and taken_over: true, and nothing locks again until the next tool call.\n",
     "- **Hits:** an attack or interaction hits when confirmed on the target. A throw or shot hits when its projectile hit the target, or the target was hurt before the next use aimed at it. An action that never went out counts only in reasons; one after the target died counts as after_death.\n",
     "- **Reasons:** the action reasons plus target_dead and interrupted; projectile_in_flight also covers an empty hand right after using an item now gone from the inventory, such as a returning throw.\n",
     "- **verbose: true** adds clock (tick or wall), confirmed (a count), the whole summary (first_tick, last_tick, hits_mean), warm_up and actors_stopped, and steps: each step's times, wait_for and if details, outcome (the action tool's reply) or error or skipped, expect {met, confirmed, holds}, and for a repeat its runs and what ended them.\n",
     "\n",
-    "Returns {run_id, state, timing {wall_ms, first_tick, last_tick}, summary, failed_steps, stopped, failures, error, warm_up {done, detail}, recording, notes}:\n",
+    "Returns {run_id, state, timing {wall_ms, first_tick, last_tick}, summary, failed_steps, stopped, failures, error, warm_up {done, detail}, recording, taken_over, notes}:\n",
     "- summary.targets maps each entity id to {label, spawned_by, type, steps, hits, misses, after_death, killed_by, final, reasons}. killed_by is {step, run, tick, cause, killer, source} of the last action before its entity_die (source bridge or native), or null; final.state is dead, alive, gone or unknown.\n",
     "- summary.totals counts actions, confirmed, unconfirmed, hits, misses, kills and reasons.\n",
     "- failed_steps has one line per step that was skipped, failed, went unconfirmed or missed its expect: {index, action, target, ok: false, confirmed, reason, error}, where reason is an action reason, expect_unmet or skipped. A repeat gives {runs, failed, reasons} instead.\n",
@@ -429,13 +449,31 @@ pub fn tools() -> Vec<Tool> {
                     },
                     "arrival_radius": { "type": "number", "exclusiveMinimum": 0, "description": "Horizontal distance that counts as arrived (default 1)" },
                     "timeout_ms": { "type": "integer", "minimum": 0, "maximum": 300000, "description": "Give up walking to the target after this long (default 20000)" },
-                    "avoid_water": { "type": "boolean", "description": "Stop at water or lava instead of walking in (default true; actor self with the Bridge pack)" },
+                    "avoid_water": { "type": "boolean", "description": "Keep actor self out of water: paths go around it, and straight walking with the Bridge pack stops at its edge (default true)" },
                     "forward": { "type": "number", "description": "Positive walks forward, negative back, 0 releases both keys" },
                     "strafe": { "type": "number", "description": "Positive steps right, negative left, 0 releases both keys" },
                     "jump": { "type": "boolean", "description": "Hold (true) or release (false) key.jump, also while walking with to; a simulated player jumps once, and ignores it with to" },
                     "sneak": { "type": "boolean", "description": "Hold (true) or release (false) key.sneak; not with to, and simulated players cannot sneak" },
                     "sprint": { "type": "boolean", "description": "Hold (true) or release (false) key.sprint, also while walking with to; a simulated player moves at full speed, and ignores it with to" },
                     "duration_ms": { "type": "integer", "minimum": 0, "maximum": 300000, "description": "Hold the manual keys this long, then release them" }
+                }), &[])
+            }),
+        ),
+        tool(
+            Hints::ACT,
+            "Fight mobs",
+            |s, a| reply(drivers::run(s, "fight", a)?),
+            json!({
+                "name": "fight",
+                "description": FIGHT,
+                "inputSchema": object(json!({
+                    "actor": describe(actor(), "Only \"self\" (default): the player who ran /connect"),
+                    "target": { "type": "string", "description": "An entity id, a type id with a colon such as minecraft:zombie, or a family such as monster (default monster)" },
+                    "all": { "type": "boolean", "description": "Fight every matching mob in turn, nearest first, not only one (default false)" },
+                    "max_targets": { "type": "integer", "minimum": 1, "maximum": 64, "description": "The most mobs to fight (default 1, or 16 with all)" },
+                    "radius": { "type": "number", "exclusiveMinimum": 0, "maximum": 64, "description": "How far around the player to look for mobs, in blocks (default 24)" },
+                    "timeout_ms": { "type": "integer", "minimum": 0, "maximum": 300000, "description": "End the fight after this long (default 60000)" },
+                    "aim": { "enum": ["tp", "mouse"], "description": "Without the Bridge pack: tp (default) aims with /tp, accurate but each prints a chat line; mouse aims with mouse flicks, quiet but less accurate. Ignored with the pack" }
                 }), &[])
             }),
         ),

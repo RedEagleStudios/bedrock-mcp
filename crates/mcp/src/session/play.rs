@@ -50,7 +50,7 @@ impl Session {
                 .map_or(1.0, |window| window.scale))
         };
         let clock = Arc::clone(&self.clock);
-        self.with_agent(|agent, controller| {
+        self.with_input(|agent, controller| {
             let env = InputEnv {
                 bindings: &bindings,
                 scale: &scale,
@@ -78,7 +78,7 @@ impl Session {
         let after = world.socket().event_count();
         let bindings = self.bindings();
         let clock = Arc::clone(&self.clock);
-        self.with_agent(|agent, controller| controller.send_chat(agent, &*clock, &bindings, text))?;
+        self.with_input(|agent, controller| controller.send_chat(agent, &*clock, &bindings, text))?;
         let event = world
             .socket()
             .wait_event(after, CHAT_CONFIRM_TIMEOUT, |event| {

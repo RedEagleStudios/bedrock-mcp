@@ -213,6 +213,15 @@ impl World {
             .unwrap_or_else(|poison| poison.into_inner()) = Some((connection, present));
     }
 
+    /// Drop the cached answer: the WebSocket outlives a world change, so another world on
+    /// the same connection may have the pack or not.
+    pub fn forget_bridge(&self) {
+        *self
+            .bridge
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
+    }
+
     /// Keep an entity list for paging; returns its number.
     pub fn keep_entity_list(&self, entities: Vec<Value>) -> u64 {
         let mut lists = self
