@@ -1,0 +1,2 @@
+pack.name=bedrock-mcp GameTest
+pack.description=Spawns and drives GameTest simulated players for bedrock-mcp with /re_mcp:gametest_* commands. The world needs the Beta APIs experiment.

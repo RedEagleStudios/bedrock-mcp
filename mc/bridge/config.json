@@ -1,0 +1,53 @@
+{
+	"$schema": "https://raw.githubusercontent.com/Bedrock-OSS/regolith-schemas/main/config/v1.1.json",
+	"author": "bedrock-mcp",
+	"name": "bedrock-mcp Bridge",
+	"packs": {
+		"behaviorPack": "./packs/BP"
+	},
+	"regolith": {
+		"dataPath": "./data",
+		"filterDefinitions": {
+			"esbuild": {
+				"url": "github.com/ink0rr/regolith-filters",
+				"version": "0.1.0"
+			},
+			"typecheck": {
+				"runWith": "shell",
+				"command": "bun run tsc --project ./data/scripts --noEmit --skipLibCheck"
+			}
+		},
+		"profiles": {
+			"default": {
+				"export": {
+					"target": "development"
+				},
+				"filters": [
+					{
+						"filter": "esbuild",
+						"settings": {
+							"sourcemap": true
+						}
+					}
+				]
+			},
+			"build": {
+				"export": {
+					"target": "local"
+				},
+				"filters": [
+					{
+						"filter": "typecheck"
+					},
+					{
+						"filter": "esbuild",
+						"settings": {
+							"minify": true,
+							"sourcemap": false
+						}
+					}
+				]
+			}
+		}
+	}
+}

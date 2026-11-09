@@ -1,0 +1,2 @@
+pack.name=bedrock-mcp Bridge
+pack.description=Connects to the bedrock-mcp WebSocket and answers /re_mcp: state commands

@@ -1,0 +1,14 @@
+[package]
+name = "protocol"
+description = "Messages between the bedrock-mcp server and the agent inside Minecraft"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

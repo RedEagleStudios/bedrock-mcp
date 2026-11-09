@@ -1,0 +1,13 @@
+[package]
+name = "rtti"
+description = "Finds C++ classes' vtables in a 64-bit MSVC PE image through its RTTI or string anchors"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+memchr = "2"

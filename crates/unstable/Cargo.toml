@@ -1,0 +1,23 @@
+[package]
+name = "bedrock-unstable"
+description = "Optional unstable layer: game internals through vtables found by RTTI or string anchors"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "bedrock_unstable"
+crate-type = ["cdylib"]
+
+[dependencies]
+protocol.workspace = true
+endpoint.workspace = true
+rtti.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_SystemServices"] }
+
+[lints]
+workspace = true

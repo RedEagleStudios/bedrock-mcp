@@ -1,0 +1,26 @@
+{
+	"newLineKind": "auto",
+	"typescript": {
+		"deno": true,
+		"lineWidth": 100,
+		"useTabs": true,
+		"newLineKind": "auto",
+		"module.sortImportDeclarations": "maintain",
+		"importDeclaration.sortNamedImports": "caseSensitive"
+	},
+	"json": {
+		"lineWidth": 100,
+		"useTabs": true,
+		"trailingCommas": "never"
+	},
+	"excludes": [
+		"**/.*",
+		"**/node_modules",
+		"**/*-lock.json"
+	],
+	"plugins": [
+		"https://plugins.dprint.dev/typescript-0.96.1.wasm",
+		"https://plugins.dprint.dev/json-0.22.0.wasm",
+		"https://plugins.dprint.dev/markdown-0.22.1.wasm"
+	]
+}

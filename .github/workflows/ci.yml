@@ -1,0 +1,73 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add clippy rustfmt
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked -p protocol -p bedrock-mcp -p rtti -p ocr
+
+  windows-crates:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+      - run: rustup target add x86_64-pc-windows-gnu && rustup component add clippy
+      - run: >-
+          cargo clippy --locked --target x86_64-pc-windows-gnu
+          -p bedrock-mcp --all-targets -- -D warnings
+      - run: >-
+          cargo clippy --locked --release --target x86_64-pc-windows-gnu
+          -p bedrock-agent -p bedrock-unstable -p bedrock-inject -- -D warnings
+      - run: cargo build --locked --release --target x86_64-pc-windows-gnu -p bedrock-agent -p bedrock-unstable -p bedrock-inject
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add clippy
+      - run: cargo clippy --locked -p protocol -p bedrock-mcp -p bedrock-inject --all-targets -- -D warnings
+      - run: cargo test --locked -p protocol -p bedrock-mcp -p bedrock-unstable
+      - run: cargo build --locked --release -p bedrock-mcp -p bedrock-agent -p bedrock-unstable
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bedrock-mcp-windows
+          path: |
+            target/release/bedrock-mcp.exe
+            target/release/bedrock_agent.dll
+            target/release/bedrock_unstable.dll
+
+  packs:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        pack: [bridge, gametest]
+    defaults:
+      run:
+        working-directory: mc/${{ matrix.pack }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+
+  install:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --locked -p bedrock-mcp
+      - if: runner.os == 'Linux'
+        run: scripts/test-install.sh target/debug/bedrock-mcp
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/test-install.ps1 target/debug/bedrock-mcp.exe

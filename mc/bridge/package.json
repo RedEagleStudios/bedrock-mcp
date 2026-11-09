@@ -1,0 +1,17 @@
+{
+	"name": "bedrock-mcp-bridge",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"build": "rgl run",
+		"typecheck": "tsc --project ./data/scripts --noEmit --skipLibCheck",
+		"fmt": "dprint fmt"
+	},
+	"dependencies": {
+		"@minecraft/server": "2.11.0"
+	},
+	"devDependencies": {
+		"dprint": "^0.60.1",
+		"typescript": "^5.9.3"
+	}
+}

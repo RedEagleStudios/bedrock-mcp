@@ -1,0 +1,18 @@
+{
+	"name": "bedrock-mcp-gametest",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"build": "rgl run",
+		"typecheck": "tsc --project ./data/scripts --noEmit --skipLibCheck",
+		"fmt": "dprint fmt"
+	},
+	"dependencies": {
+		"@minecraft/server": "2.12.0-beta.1.26.60-stable",
+		"@minecraft/server-gametest": "1.0.0-beta.1.26.60-stable"
+	},
+	"devDependencies": {
+		"dprint": "^0.60.1",
+		"typescript": "^5.9.3"
+	}
+}

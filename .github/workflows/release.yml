@@ -1,0 +1,164 @@
+name: Release
+
+# Push a tag named after the workspace version (v0.1.0 for version = "0.1.0") to publish a
+# GitHub Release with the Linux and Windows builds and the two packs.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to release, e.g. v0.1.0
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  RGL_VERSION: v0.17.0
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Tag matches the workspace version
+        run: |
+          version="$(cargo pkgid -p bedrock-mcp | sed 's/.*@//')"
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG does not match the workspace version $version (expected v$version)."
+            exit 1
+          fi
+
+  # Builds the packs once: the binaries embed them and the release attaches them as .mcpack.
+  packs:
+    needs: version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: oven-sh/setup-bun@v2
+      - name: Install rgl
+        run: |
+          curl -fsSL -o rgl.zip "https://github.com/ink0rr/rgl/releases/download/$RGL_VERSION/rgl-x86_64-unknown-linux-gnu.zip"
+          unzip -q rgl.zip -d "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build the packs
+        run: |
+          mkdir -p dist
+          for pack in bridge gametest; do
+            (
+              cd "mc/$pack"
+              bun install --frozen-lockfile
+              rgl get
+              rgl run build
+              folder="$(find build -mindepth 1 -maxdepth 1 -type d -name '*_bp' | head -n 1)"
+              [ -n "$folder" ] || { echo "::error::rgl exported no behavior pack for $pack"; exit 1; }
+              (cd "$folder" && zip -q -r "$GITHUB_WORKSPACE/dist/bedrock-mcp-$pack.mcpack" .)
+            )
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-packs
+          path: dist/*.mcpack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pack-builds
+          path: |
+            mc/bridge/build
+            mc/gametest/build
+
+  linux:
+    needs: packs
+    # The oldest supported runner, so the binary runs on older glibc versions too.
+    runs-on: ubuntu-22.04
+    env:
+      BEDROCK_MCP_REQUIRE_PACKS: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: pack-builds
+          path: mc
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+      - run: rustup target add x86_64-pc-windows-gnu
+      - run: cargo build --locked --release -p bedrock-mcp
+      # The agent, the unstable layer and the injector run inside the game under Wine.
+      - run: cargo build --locked --release --target x86_64-pc-windows-gnu -p bedrock-agent -p bedrock-unstable -p bedrock-inject
+      - name: Package
+        run: |
+          name="bedrock-mcp-linux-x86_64"
+          mkdir -p "dist/$name"
+          cp target/release/bedrock-mcp \
+            target/x86_64-pc-windows-gnu/release/bedrock_agent.dll \
+            target/x86_64-pc-windows-gnu/release/bedrock_unstable.dll \
+            target/x86_64-pc-windows-gnu/release/bedrock-inject.exe \
+            README.md LICENSE "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: dist/*.tar.gz
+
+  windows:
+    needs: packs
+    runs-on: windows-latest
+    env:
+      BEDROCK_MCP_REQUIRE_PACKS: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: pack-builds
+          path: mc
+      - run: cargo build --locked --release -p bedrock-mcp -p bedrock-agent -p bedrock-unstable
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "bedrock-mcp-windows-x86_64"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item target/release/bedrock-mcp.exe, target/release/bedrock_agent.dll, `
+            target/release/bedrock_unstable.dll, README.md, LICENSE "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: dist/*.zip
+
+  release:
+    needs: [linux, windows, packs]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      # Asset names carry no version, so releases/latest/download/<name> always finds the newest
+      # release, and the installers ship with the release they install.
+      - run: cp scripts/install.sh scripts/install.ps1 dist/
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* --generate-notes --verify-tag --title "$TAG" --repo "$GITHUB_REPOSITORY"
+          fi

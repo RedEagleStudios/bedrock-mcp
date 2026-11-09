@@ -1,0 +1,18 @@
+[package]
+name = "ocr"
+description = "Reads text in Minecraft Bedrock screenshots by matching the game's pixel fonts"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+png = "0.18"
+serde.workspace = true
+ttf-parser = "0.25"
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
