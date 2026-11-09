@@ -2,7 +2,7 @@
 # Install or update Bedrock MCP for Minecraft on Linux x86_64:
 #
 #   curl -fsSL https://github.com/RedEagleStudios/bedrock-mcp/releases/latest/download/install.sh | sh
-#   curl -fsSL https://github.com/RedEagleStudios/bedrock-mcp/releases/latest/download/install.sh | sh -s -- v0.2.0
+#   curl -fsSL https://github.com/RedEagleStudios/bedrock-mcp/releases/latest/download/install.sh | sh -s -- v0.1.0
 #
 # Running it again updates in place. Each file is replaced by a rename, so a server that is running
 # keeps its files until the MCP client restarts it. BEDROCK_MCP_RELEASES points it at another

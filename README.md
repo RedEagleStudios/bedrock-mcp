@@ -10,6 +10,11 @@ It runs on Windows, and on Linux with the game under Wine or Proton: it starts t
 [mcbe-gdk-linux](https://gitlab.com/veedy-dev/mcbe-gdk-installer) or your own command, and attaches
 to a game started by any launcher.
 
+> [!NOTE]
+> Bedrock MCP is in early development. Tool names, arguments and replies, and the Bridge and
+> GameTest packs' commands, can change in breaking ways between releases. Pin a release (see
+> [Install](#install)) when you need them to stay put.
+
 **NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.**
 
 > [!WARNING]
@@ -29,7 +34,7 @@ to a game started by any launcher.
 | Unstable layer | `crates/unstable` builds `bedrock_unstable.dll` | Optional. Reads game internals: content log, screen stacks, UI controls and Ore UI pages, camera, HUD text, server entities and dynamic properties, player animations and frame timings. See [Unstable layer](#unstable-layer). |
 | OCR | `crates/ocr` | Reads text in captures by matching the game's own pixel fonts. |
 | Protocol | `crates/protocol` | The JSON-lines messages between server and DLLs. |
-| Bridge pack | `mc/bridge/` | Optional, but most add-on tests need it. A behavior pack whose `re_mcp:*` commands answer with JSON over the WebSocket: player, inventory, entities, blocks, containers, items, raycasts, world info, scoreboards and a buffer of script events. See [Packs](#packs) for what works without it. |
+| Bridge pack | `mc/bridge/` | Optional. A behavior pack whose `re_mcp:*` commands answer with JSON over the WebSocket: player, inventory, entities, blocks, containers, items, raycasts, world info, scoreboards and a buffer of script events. Without it, single-player tests fall back to the unstable layer and vanilla commands; see [Packs](#packs) for what still needs it. |
 | GameTest pack | `mc/gametest/` | Optional behavior pack for GameTest simulated players. Needs the Beta APIs experiment. |
 
 ## Install
@@ -58,11 +63,11 @@ it. `bedrock-mcp --version` prints the installed version.
 To install a specific release, pass its tag:
 
 ```bash
-curl -fsSL https://github.com/RedEagleStudios/bedrock-mcp/releases/latest/download/install.sh | sh -s -- v0.2.0
+curl -fsSL https://github.com/RedEagleStudios/bedrock-mcp/releases/latest/download/install.sh | sh -s -- v0.1.0
 ```
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/RedEagleStudios/bedrock-mcp/releases/latest/download/install.ps1))) v0.2.0
+& ([scriptblock]::Create((irm https://github.com/RedEagleStudios/bedrock-mcp/releases/latest/download/install.ps1))) v0.1.0
 ```
 
 To uninstall, delete the install folder (and `~/.local/bin/bedrock-mcp` on Linux).

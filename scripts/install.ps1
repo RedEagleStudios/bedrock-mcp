@@ -1,7 +1,7 @@
 # Install or update Bedrock MCP for Minecraft on Windows x86_64:
 #
 #   irm https://github.com/RedEagleStudios/bedrock-mcp/releases/latest/download/install.ps1 | iex
-#   & ([scriptblock]::Create((irm https://github.com/RedEagleStudios/bedrock-mcp/releases/latest/download/install.ps1))) v0.2.0
+#   & ([scriptblock]::Create((irm https://github.com/RedEagleStudios/bedrock-mcp/releases/latest/download/install.ps1))) v0.1.0
 #
 # Running it again updates in place. Windows cannot overwrite a running bedrock-mcp.exe, so the old
 # files are renamed aside and deleted once nothing uses them, at the latest by the next update.
