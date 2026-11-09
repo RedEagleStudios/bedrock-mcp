@@ -13,6 +13,7 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
+    sync::Mutex,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -30,6 +31,12 @@ use crate::{
 const LAUNCHER: &str = "mcbe-gdk-linux";
 /// A shell command that starts the game; it replaces mcbe-gdk-linux for game_launch.
 pub const LAUNCH_COMMAND: &str = "BEDROCK_MCP_LAUNCH_COMMAND";
+/// Run the game inside a headless gamescope: `1` for 1920x1080, or `WIDTHxHEIGHT`.
+pub const HEADLESS: &str = "BEDROCK_MCP_HEADLESS";
+const GAMESCOPE: &str = "gamescope";
+const HEADLESS_SIZE: (u32, u32) = (1920, 1080);
+/// gamescope's frame limit; the game renders at this rate though no screen shows it.
+const HEADLESS_FPS: u32 = 60;
 const DEBUGGERS: [&str; 2] = ["winedbg", "winedbg.exe"];
 /// What [`Install::crash_handler_running`] looks for, for messages.
 pub const CRASH_HANDLER: &str = "Wine's crash debugger";
@@ -148,6 +155,89 @@ fn mapped_agent_profile(maps: &str) -> Option<PathBuf> {
 /// Whether an executable `name` is on `PATH`.
 fn on_path(name: &str) -> bool {
     var("PATH").is_some_and(|path| env::split_paths(&path).any(|dir| dir.join(name).is_file()))
+}
+
+/// The current game's gamescope size when it runs headless; set at each launch and attach.
+static HEADLESS_GAME: Mutex<Option<(u32, u32)>> = Mutex::new(None);
+
+/// The gamescope size for a launch: game_launch's `headless` argument when given (`true`, a
+/// size such as `"1280x720"`, or `false` to launch on the desktop), else [`HEADLESS`].
+pub fn resolve_headless(argument: Option<&Value>) -> Result<Option<(u32, u32)>> {
+    match argument {
+        None | Some(Value::Null) => {
+            parse_headless(var(HEADLESS).as_deref().and_then(OsStr::to_str))
+        }
+        Some(Value::Bool(on)) => Ok(on.then_some(HEADLESS_SIZE)),
+        Some(Value::String(text)) => parse_headless(Some(text)),
+        Some(other) => {
+            bail!("headless is true, false or a size such as \"1280x720\", not {other}.")
+        }
+    }
+}
+
+/// `1`, `true` or `yes` for the default size, `WIDTHxHEIGHT` for another; unset, `0`,
+/// `false` or `no` for none.
+fn parse_headless(value: Option<&str>) -> Result<Option<(u32, u32)>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "0" | "false" | "no" => return Ok(None),
+        "1" | "true" | "yes" => return Ok(Some(HEADLESS_SIZE)),
+        _ => {}
+    }
+    value
+        .split_once(['x', 'X'])
+        .and_then(|(width, height)| Some((width.parse().ok()?, height.parse().ok()?)))
+        .filter(|&(width, height): &(u32, u32)| {
+            (320..=7680).contains(&width) && (240..=4320).contains(&height)
+        })
+        .map(Some)
+        .ok_or_else(|| {
+            Error::msg(format!(
+                "headless {value} is not on or off or a size such as 1920x1080 ({HEADLESS} \
+                 takes the same values)."
+            ))
+        })
+}
+
+/// Whether game `pid` runs inside gamescope, which gives the processes it starts this
+/// variable; its window is then out of the desktop's reach.
+pub fn runs_in_gamescope(pid: u32) -> bool {
+    environ(pid)
+        .iter()
+        .any(|(name, _)| name == "GAMESCOPE_WAYLAND_DISPLAY")
+}
+
+/// Record the current game's headless size, or `None` for a game on the desktop; the desktop
+/// backend follows it.
+pub fn set_headless_game(size: Option<(u32, u32)>) {
+    *HEADLESS_GAME
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = size;
+}
+
+/// The current game's headless size, when it runs inside gamescope.
+pub fn headless_game() -> Option<(u32, u32)> {
+    *HEADLESS_GAME
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// gamescope's arguments up to the `--` before the command it runs: its own output with no
+/// screen behind it, at `size` and [`HEADLESS_FPS`].
+fn headless_args((width, height): (u32, u32)) -> Vec<String> {
+    vec![
+        "--backend".to_owned(),
+        "headless".to_owned(),
+        "-W".to_owned(),
+        width.to_string(),
+        "-H".to_owned(),
+        height.to_string(),
+        "-r".to_owned(),
+        HEADLESS_FPS.to_string(),
+        "--".to_owned(),
+    ]
 }
 
 /// `profile` is this server's folder for the game, `prefix` its Wine prefix. The configured
@@ -373,25 +463,30 @@ impl Install {
     }
 
     /// Start the game detached: `$BEDROCK_MCP_LAUNCH_COMMAND` through `sh -c` (with `args`
-    /// as `$@`), else `mcbe-gdk-linux launch [args...]`. Returns the install to drive: for a
-    /// launch command, the game it started, once its process appears within `timeout`.
+    /// as `$@`), else `mcbe-gdk-linux launch [args...]`, inside a headless gamescope of
+    /// `headless` size when given. Returns the install to drive: for a launch command, the
+    /// game it started, once its process appears within `timeout`.
     pub fn launch(
         &self,
         args: &[String],
         extra_env: &[(String, String)],
+        headless: Option<(u32, u32)>,
         timeout: Duration,
         clock: &dyn Clock,
     ) -> Result<Self> {
         let custom = var(LAUNCH_COMMAND);
-        let (mut command, name, log) = if let Some(shell) = &custom {
-            let log = data_home().join("bedrock-mcp/launch-command.log");
-            let mut command = Command::new("sh");
-            command.arg("-c").arg(shell).arg("sh").args(args);
-            (command, LAUNCH_COMMAND.to_owned(), Some(log))
+        let (program, program_args, name) = if let Some(shell) = &custom {
+            let mut shell_args = vec![OsString::from("-c"), shell.clone(), "sh".into()];
+            shell_args.extend(args.iter().map(OsString::from));
+            (OsString::from("sh"), shell_args, LAUNCH_COMMAND.to_owned())
         } else if self.launcher_owned() {
-            let mut command = Command::new(LAUNCHER);
-            command.arg("launch").args(args);
-            (command, format!("{LAUNCHER} launch"), None)
+            let mut launcher_args = vec![OsString::from("launch")];
+            launcher_args.extend(args.iter().map(OsString::from));
+            (
+                OsString::from(LAUNCHER),
+                launcher_args,
+                format!("{LAUNCHER} launch"),
+            )
         } else {
             bail!(
                 "Minecraft is not running and this server cannot start it: set {LAUNCH_COMMAND} \
@@ -399,6 +494,31 @@ impl Install {
                  with your launcher and call game_launch again to attach."
             );
         };
+        let mut command = match headless {
+            Some(size) => {
+                if !on_path(GAMESCOPE) {
+                    bail!(
+                        "A headless launch runs the game inside gamescope, which is not on \
+                         PATH; install it (the gamescope package), or launch with headless: \
+                         false or without {HEADLESS}."
+                    );
+                }
+                let mut command = Command::new(GAMESCOPE);
+                command
+                    .args(headless_args(size))
+                    .arg(&program)
+                    .args(&program_args);
+                command
+            }
+            None => {
+                let mut command = Command::new(&program);
+                command.args(&program_args);
+                command
+            }
+        };
+        // A launch command or gamescope writes its output where the user can read it.
+        let log = (custom.is_some() || headless.is_some())
+            .then(|| data_home().join("bedrock-mcp/launch-command.log"));
         let (output, errors) = match &log {
             Some(log) => {
                 fs::create_dir_all(log.parent().unwrap_or(Path::new("/")))?;
@@ -416,7 +536,9 @@ impl Install {
         command
             .spawn()
             .map_err(|error| Error::msg(format!("Cannot run {name}: {error}")))?;
-        let Some(log) = log else {
+        // The flag also switches the desktop backend: no compositor reaches gamescope.
+        set_headless_game(headless);
+        let Some(log) = log.filter(|_| custom.is_some()) else {
             return Ok(Self::configured());
         };
         let started = poll(clock, timeout, Duration::from_millis(250), || {
@@ -967,7 +1089,48 @@ fn audio_args(path: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
     use crate::recorder::video_args;
+
+    #[test]
+    fn headless_takes_on_off_or_a_size_and_refuses_anything_else() {
+        assert_eq!(parse_headless(None).unwrap(), None);
+        assert_eq!(parse_headless(Some(" 0 ")).unwrap(), None);
+        assert_eq!(parse_headless(Some("no")).unwrap(), None);
+        assert_eq!(parse_headless(Some("1")).unwrap(), Some(HEADLESS_SIZE));
+        assert_eq!(parse_headless(Some("TRUE")).unwrap(), Some(HEADLESS_SIZE));
+        assert_eq!(parse_headless(Some("1280x720")).unwrap(), Some((1280, 720)));
+        for bad in ["big", "1280", "10x10", "1280x", "99999x720"] {
+            let error = parse_headless(Some(bad)).unwrap_err().to_string();
+            assert!(error.contains(HEADLESS), "{bad}: {error}");
+        }
+        // The argument wins over the setting, and false launches on the desktop.
+        assert_eq!(
+            resolve_headless(Some(&json!(true))).unwrap(),
+            Some(HEADLESS_SIZE)
+        );
+        assert_eq!(resolve_headless(Some(&json!(false))).unwrap(), None);
+        assert_eq!(
+            resolve_headless(Some(&json!("800x600"))).unwrap(),
+            Some((800, 600))
+        );
+        assert!(resolve_headless(Some(&json!(3))).is_err());
+        assert_eq!(
+            headless_args((1280, 720)),
+            [
+                "--backend",
+                "headless",
+                "-W",
+                "1280",
+                "-H",
+                "720",
+                "-r",
+                "60",
+                "--"
+            ]
+        );
+    }
 
     #[test]
     fn basenames_split_on_both_separators_and_ignore_case() {

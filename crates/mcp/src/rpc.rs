@@ -28,7 +28,10 @@ Testing an add-on in the game (prompts/list offers these flows ready to follow: 
 record_combat, debug_pack_errors, test_ui_flow):
 1. game_launch, then world_open {name} (worlds_list shows names and packs), then \
 automation_connect (bridge: true means the world runs the Bridge pack), then scene_reset to set \
-the place, entities, time, inventory and perspective in one call.
+the place, entities, time, inventory and perspective in one call. On Linux, game_launch \
+{headless: true} runs the game off-screen at full speed (needs gamescope): use it when the user \
+wants their screen free or is not watching, and a normal launch when they want to watch or play \
+along. headless in its reply says which one runs.
 The Bridge pack is the user's choice. Never install it or add it to a world on your own: no \
 packs_install without check: true, no world_packs_set for it, unless the user asked. Without it, \
 single-player tests still run on native reads and vanilla commands (cheats on). Suggest it to \

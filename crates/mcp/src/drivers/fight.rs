@@ -53,9 +53,9 @@ const SWING_RANGE: f64 = 3.0;
 const KEEP_OFF: f64 = 1.5;
 /// Farther than this the player steps in, so the mob stays within reach.
 const STEP_IN: f64 = 2.8;
-/// How far ahead a footwork step checks for ground, in blocks: a step back or aside never
-/// goes off a platform's edge.
-const STEP_CHECK: f64 = 1.0;
+/// Where along a footwork step the ground is checked, in blocks: a step back or aside never
+/// goes off a platform's edge, with room left for a mob's knockback.
+const STEP_CHECKS: [f64; 2] = [0.8, 2.0];
 /// A sprint hit needs a run-up from at least this far.
 const RUN_UP_FROM: f64 = 2.2;
 /// Time between swings: a mob ignores damage for 10 ticks after it was hurt
@@ -106,9 +106,9 @@ const TP_SETTLE: Duration = Duration::from_millis(100);
 /// How long after an exact aim (/tp or the pack's) the eased steps wait: until the reads show
 /// the new view.
 const EXACT_QUIET: Duration = Duration::from_millis(400);
-/// With the Bridge pack, how long a due swing waits for the eased view to come onto the mob
-/// before the pack's exact aim turns it.
-const PACK_PATIENCE: Duration = Duration::from_millis(300);
+/// How long the fight keeps looking when no mob matches, before it ends: a mob summoned
+/// right before the fight may not show in the reads yet.
+const PICK_GRACE: Duration = Duration::from_millis(1500);
 /// The most other mobs whose health is read to count hits that went to them.
 const MAX_OTHERS: usize = 8;
 /// The most events one poll handles.
@@ -429,6 +429,8 @@ struct Keys {
     forward: f64,
     strafe: f64,
     sprint: bool,
+    /// Held near an edge: a sneaking player does not walk or get pushed off a block's edge.
+    sneak: bool,
 }
 
 /// A fight while it runs; see the module docs.
@@ -467,8 +469,8 @@ pub struct Fighter {
     teleported: Option<Instant>,
     /// When the last exact aim (/tp or the pack's) went out.
     exact_at: Option<Instant>,
-    /// With the Bridge pack: since when a due swing waits for the eased view.
-    aim_wait: Option<Instant>,
+    /// Since when no mob matched.
+    empty_since: Option<Instant>,
     /// Hits on other mobs than the one fought: a crowd in the way of the swing.
     stray_hits: u32,
     /// The other mobs the fight picked from, with their last read health, for `stray_hits`.
@@ -553,7 +555,7 @@ impl Fighter {
             flick: None,
             teleported: None,
             exact_at: None,
-            aim_wait: None,
+            empty_since: None,
             stray_hits: 0,
             others: Vec::new(),
             ended: None,
@@ -611,13 +613,18 @@ impl Fighter {
             }
             return match self.pick(game, pose)? {
                 Some(foe) => {
+                    self.empty_since = None;
                     self.current = Some(Engagement::new(foe));
                     self.walker.retarget();
-                    self.aim_wait = None;
                     if self.reads == Reads::Native {
                         let id = self.current.as_ref().expect("just set").foe.id.clone();
                         self.tracker.track(game, &id);
                     }
+                    Ok(false)
+                }
+                None if self.empty_since.get_or_insert_with(Instant::now).elapsed()
+                    < PICK_GRACE =>
+                {
                     Ok(false)
                 }
                 None => {
@@ -986,6 +993,7 @@ impl Fighter {
                     forward: 1.0,
                     strafe: 0.0,
                     sprint: true,
+                    sneak: false,
                 },
             );
         }
@@ -1080,43 +1088,53 @@ impl Fighter {
     }
 
     /// With the Bridge pack: the read view is current, so an angle check against the aim
-    /// decides. When it is still off [`PACK_PATIENCE`] after the swing was due, the pack's
-    /// exact aim turns the view (no chat) and the click follows at once.
+    /// decides. When it is off, the pack's exact aim turns the view on the server (no chat),
+    /// and the click follows once the client took the turn, as with /tp.
     fn pack_aim(&mut self, pose: Pose, pitch: f64, foe: &Foe, aim: (f64, f64)) -> Result<bool> {
-        if on_aim(pose.yaw, pitch, aim, flat(pose.feet, foe.feet)) {
-            self.aim_wait = None;
-            return Ok(true);
+        if let Some(settled) = self.settled() {
+            return Ok(settled);
         }
-        if self.aim_wait.get_or_insert_with(Instant::now).elapsed() < PACK_PATIENCE {
-            return Ok(false);
+        if on_aim(pose.yaw, pitch, aim, flat(pose.feet, foe.feet)) {
+            return Ok(true);
         }
         let spec = format!("entity={}", foe.id);
         self.world
             .bridge_write(&format!("re_mcp:aim {}", quoted(&spec)?))?;
-        self.walker.camera.snapped(aim.1);
+        self.aimed_exactly(aim.1);
+        Ok(false)
+    }
+
+    /// After an exact aim: `Some(true)` once the client had [`TP_SETTLE`] to take the turn,
+    /// `Some(false)` before, `None` without one in flight.
+    fn settled(&mut self) -> Option<bool> {
+        let at = self.teleported?;
+        if at.elapsed() < TP_SETTLE {
+            return Some(false);
+        }
+        self.teleported = None;
+        Some(true)
+    }
+
+    /// An exact aim (/tp or the pack's) to `pitch` went out: the click waits for it, and the
+    /// eased steps leave the view alone until the reads show it.
+    fn aimed_exactly(&mut self, pitch: f64) {
+        self.walker.camera.snapped(pitch);
         self.look_aims += 1;
-        self.aim_wait = None;
-        Ok(true)
+        self.teleported = Some(Instant::now());
+        self.exact_at = self.teleported;
     }
 
     /// Without the pack, with `aim: "tp"`: when the read view is off the aim, /tp turns it to
     /// the torso on the server, and the click follows once the client took the turn.
     fn tp_aim(&mut self, pose: Pose, pitch: f64, foe: &Foe, aim: (f64, f64)) -> Result<bool> {
-        if let Some(at) = self.teleported {
-            if at.elapsed() < TP_SETTLE {
-                return Ok(false);
-            }
-            self.teleported = None;
-            return Ok(true);
+        if let Some(settled) = self.settled() {
+            return Ok(settled);
         }
         if on_aim(pose.yaw, pitch, aim, flat(pose.feet, foe.feet)) {
             return Ok(true);
         }
         view::exact(&self.world, false, aim.0, aim.1)?;
-        self.walker.camera.snapped(aim.1);
-        self.look_aims += 1;
-        self.teleported = Some(Instant::now());
-        self.exact_at = self.teleported;
+        self.aimed_exactly(aim.1);
         Ok(false)
     }
 
@@ -1188,13 +1206,21 @@ impl Fighter {
             if length == 0.0 || yaw.is_nan() {
                 return true;
             }
-            let reach = STEP_CHECK / length;
-            walker.ground_at([
-                pose.feet[0] + x * reach,
-                pose.feet[1],
-                pose.feet[2] + z * reach,
-            ])
+            STEP_CHECKS.iter().all(|step| {
+                let reach = step / length;
+                walker.ground_at([
+                    pose.feet[0] + x * reach,
+                    pose.feet[1],
+                    pose.feet[2] + z * reach,
+                ])
+            })
         };
+        // With an edge behind, mobs crowding in push the player over it: lean into them, and
+        // sneak while any edge is near, which keeps the player on the block.
+        let back = lands(&mut self.walker, -1.0, 0.0);
+        let sneak =
+            !back || !lands(&mut self.walker, 0.0, 1.0) || !lands(&mut self.walker, 0.0, -1.0);
+        let forward = if back { forward } else { 1.0 };
         for (forward, strafe) in [
             (forward, self.strafe),
             (forward, -self.strafe),
@@ -1207,10 +1233,14 @@ impl Fighter {
                     forward,
                     strafe,
                     sprint: false,
+                    sneak,
                 };
             }
         }
-        Keys::default()
+        Keys {
+            sneak,
+            ..Keys::default()
+        }
     }
 
     /// Hold the movement keys `keys` asks for, sending only a change.
@@ -1219,6 +1249,7 @@ impl Fighter {
             return Ok(());
         }
         let sprint = (keys.sprint != self.keys.sprint).then_some(keys.sprint);
+        let sneak = (keys.sneak != self.keys.sneak).then_some(keys.sneak);
         self.keys = keys;
         game.input(InputRequest {
             r#move: Some(Axes {
@@ -1226,6 +1257,7 @@ impl Fighter {
                 strafe: Some(keys.strafe),
             }),
             sprint,
+            sneak,
             ..InputRequest::default()
         })
     }

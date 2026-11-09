@@ -110,16 +110,18 @@ It starts Minecraft if needed, waits for the main menu, and injects and connects
 
 - A start first turns WebSockets on and encrypted WebSockets off in options.txt.
 - Linux starts the game with the BEDROCK_MCP_LAUNCH_COMMAND shell command, else mcbe-gdk-linux; Windows uses the shell.
+- headless (Linux, with gamescope installed) starts the game inside a headless gamescope: it renders at full speed on no screen, so it never covers the user's windows and the user cannot see it; the agent supplies its window, clicks and frames. Use it when the user does not need to watch or wants their screen free. Without the argument, BEDROCK_MCP_HEADLESS decides. A game already running stays where it runs; one attached inside gamescope is reported as headless.
 - Linux finds a game from any launcher by its process; it fails, listing them, when several run and pid picks none.
 - size applies on Hyprland (and makes the window floating) and on Windows; elsewhere notes say it was left alone.
 - A running game ignores args and env. Windows takes no env and at most one minecraft:// link.
 
-Returns {pid, already_running, agent, window, menu_text, websocket_port, notes}. menu_text is the menu text OCR read.
+Returns {pid, already_running, agent, window, headless, menu_text, websocket_port, notes}: headless is {width, height} when the game runs inside gamescope, else null. menu_text is the menu text OCR read.
 
 | Argument | Type | Description |
 | --- | --- | --- |
 | `args` | array of string | Game arguments, e.g. one minecraft:// link |
 | `env` | object | Extra environment for the launcher (Linux only) |
+| `headless` | boolean or string | Linux: true or a size such as "1280x720" runs a game this call starts in a headless gamescope (default 1920x1080); false starts it on the desktop. Default: the BEDROCK_MCP_HEADLESS setting |
 | `pid` | integer, at least 1 | The game process to attach to when several run |
 | `size` | array of integer, at least 1 | [width, height] in logical pixels |
 | `timeout_ms` | integer, at least 0 | Main-menu wait (default 300000) |
@@ -198,7 +200,7 @@ It reads the game, agent, window, WebSocket, world and unstable layer in one cal
 - On generic Linux desktops the window size is at scale 1 and workspace is null.
 - input_lock is {enabled, locked, taken_over, banner, note}: while the server plays, the player's real keyboard and mouse are locked out of the game; taken_over is true once the player pressed F9 since the last lock started. BEDROCK_MCP_INPUT_LOCK=0 turns it off.
 
-Returns {running, pid, crash_debugger, agent, window, in_world: {value, source, notes}, content_log_errors, attention, warnings, websocket, world, camera, recording, timeline, held, input_lock, unstable}. window.desktop is hyprland, generic or windows; unstable is null without the layer, else {capabilities, screens (scene stacks, bottom first), camera}.
+Returns {running, pid, crash_debugger, agent, window, headless, in_world: {value, source, notes}, content_log_errors, attention, warnings, websocket, world, camera, recording, timeline, held, input_lock, unstable}. window.desktop is hyprland, generic or windows; headless is {width, height} while the game runs inside gamescope (the user cannot see it), else null; unstable is null without the layer, else {capabilities, screens (scene stacks, bottom first), camera}.
 
 No arguments.
 

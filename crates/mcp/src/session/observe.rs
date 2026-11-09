@@ -488,6 +488,9 @@ impl Session {
             "crash_debugger": self.install.crash_handler_running(),
             "agent": agent,
             "window": window,
+            "headless": pid
+                .and(platform::headless_game())
+                .map(|(width, height)| json!({"width": width, "height": height})),
             "in_world": {
                 "value": in_world,
                 "source": in_world_source,

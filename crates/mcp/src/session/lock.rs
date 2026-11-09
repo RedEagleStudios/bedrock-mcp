@@ -26,6 +26,8 @@ pub const SETTING: &str = "BEDROCK_MCP_INPUT_LOCK";
 const BANNER: &str = "bedrock-mcp is playing - your input is locked - F9 to take over";
 /// The action bar fades after a few seconds, so a locked run shows the banner again this often.
 const BANNER_EVERY: Duration = Duration::from_secs(2);
+/// How long a lock holds before its banner shows, so a short call sends no banner commands.
+const BANNER_DELAY: Duration = Duration::from_secs(1);
 const BANNER_TIMEOUT: Duration = Duration::from_secs(1);
 /// How often a running sequence asks the agent whether the player took over.
 const POLL_EVERY: Duration = Duration::from_millis(250);
@@ -47,6 +49,9 @@ pub struct InputLock {
     /// The player took over since the last lock started.
     taken_over: bool,
     polled: Option<Instant>,
+    /// When the banner is next due while none shows: [`BANNER_DELAY`] after the lock, so a
+    /// short call never pays for the two action-bar commands.
+    banner_due: Option<Instant>,
     banner_shown: Option<Instant>,
     /// What went wrong with the lock or the banner most recently.
     note: Option<String>,
@@ -66,6 +71,7 @@ impl InputLock {
             suspended: false,
             taken_over: false,
             polled: None,
+            banner_due: None,
             banner_shown: None,
             note: None,
         }
@@ -99,7 +105,10 @@ impl InputLock {
                 self.note = None;
                 self.polled = Some(now);
                 self.banner_shown = None;
-                self.show_banner(world, now);
+                self.banner_due = Some(now + BANNER_DELAY);
+                if !world.is_some_and(World::connected) {
+                    self.note = Some(NO_BANNER.to_owned());
+                }
                 Ok(())
             }
             Err(error @ Error::Disconnected(_)) => Err(error),
@@ -137,7 +146,11 @@ impl InputLock {
                 }
             }
         }
-        if self.banner_shown.is_some_and(|at| now - at >= BANNER_EVERY) {
+        let due = match self.banner_shown {
+            Some(shown) => now - shown >= BANNER_EVERY,
+            None => self.banner_due.is_some_and(|due| now >= due),
+        };
+        if due {
             self.show_banner(world, now);
         }
         false
@@ -164,7 +177,11 @@ impl InputLock {
         };
         match command(world, &action_bar(BANNER)) {
             Ok(()) => self.banner_shown = Some(now),
-            Err(error) => self.note = Some(format!("The input lock banner failed: {error}")),
+            Err(error) => {
+                // Try again after another delay rather than on every poll.
+                self.banner_due = Some(now + BANNER_DELAY);
+                self.note = Some(format!("The input lock banner failed: {error}"));
+            }
         }
     }
 
@@ -386,9 +403,9 @@ mod tests {
     }
 
     #[test]
-    fn a_sequence_locks_for_its_whole_run_with_a_banner() {
+    fn a_sequence_locks_for_its_whole_run_with_a_banner_once_it_runs_a_while() {
         let mut fixture = fixture();
-        let result = walk(&mut fixture, 300, None);
+        let result = walk(&mut fixture, 1_500, None);
         assert_eq!(result["state"], "finished", "{result}");
         assert!(result.get("taken_over").is_none(), "{result}");
         assert_eq!(fixture.agent.lock().unwrap().locks(), [true, false]);
@@ -397,6 +414,18 @@ mod tests {
         assert_eq!(*banners.last().unwrap(), action_bar("§r"));
         let status = call(&mut fixture.session, "game_status", json!({}));
         assert_eq!(status["input_lock"]["locked"], false, "{status}");
+    }
+
+    #[test]
+    fn a_short_call_locks_without_banner_commands() {
+        let mut fixture = fixture();
+        call(
+            &mut fixture.session,
+            "input_send",
+            json!({"press": ["key.jump"]}),
+        );
+        assert_eq!(fixture.agent.lock().unwrap().locks(), [true, false]);
+        assert!(banners(&fixture.game).is_empty());
     }
 
     #[test]

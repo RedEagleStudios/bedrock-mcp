@@ -294,6 +294,7 @@ impl Install {
         &self,
         args: &[String],
         extra_env: &[(String, String)],
+        _headless: Option<(u32, u32)>,
         _timeout: Duration,
         _clock: &dyn Clock,
     ) -> Result<Self> {
@@ -337,6 +338,34 @@ impl Install {
             "Minecraft (pid {pid}) did not close within 15 s, so it was terminated."
         ))
     }
+}
+
+/// Headless runs use gamescope, which exists only on Linux: refuse a request for one.
+pub fn resolve_headless(argument: Option<&serde_json::Value>) -> Result<Option<(u32, u32)>> {
+    let asked = match argument {
+        Some(serde_json::Value::Bool(on)) => *on,
+        Some(serde_json::Value::String(text)) => !matches!(text.trim(), "" | "0" | "false" | "no"),
+        Some(serde_json::Value::Null) | None => false,
+        Some(_) => true,
+    };
+    if asked {
+        bail!(
+            "Headless runs need Linux with gamescope; on Windows the game renders in its own \
+             window."
+        );
+    }
+    Ok(None)
+}
+
+/// Windows has no gamescope.
+pub fn runs_in_gamescope(_pid: u32) -> bool {
+    false
+}
+
+pub fn set_headless_game(_size: Option<(u32, u32)>) {}
+
+pub fn headless_game() -> Option<(u32, u32)> {
+    None
 }
 
 /// Open `target` with the shell on a thread of its own, which COM needs initialised.

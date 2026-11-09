@@ -24,15 +24,17 @@ pub fn tools() -> Vec<Tool> {
                     "A running game is only attached.\n\n",
                     "- A start first turns WebSockets on and encrypted WebSockets off in options.txt.\n",
                     "- Linux starts the game with the BEDROCK_MCP_LAUNCH_COMMAND shell command, else mcbe-gdk-linux; Windows uses the shell.\n",
+                    "- headless (Linux, with gamescope installed) starts the game inside a headless gamescope: it renders at full speed on no screen, so it never covers the user's windows and the user cannot see it; the agent supplies its window, clicks and frames. Use it when the user does not need to watch or wants their screen free. Without the argument, BEDROCK_MCP_HEADLESS decides. A game already running stays where it runs; one attached inside gamescope is reported as headless.\n",
                     "- Linux finds a game from any launcher by its process; it fails, listing them, when several run and pid picks none.\n",
                     "- size applies on Hyprland (and makes the window floating) and on Windows; elsewhere notes say it was left alone.\n",
                     "- A running game ignores args and env. Windows takes no env and at most one minecraft:// link.\n\n",
-                    "Returns {pid, already_running, agent, window, menu_text, websocket_port, notes}. menu_text is the menu text OCR read."
+                    "Returns {pid, already_running, agent, window, headless, menu_text, websocket_port, notes}: headless is {width, height} when the game runs inside gamescope, else null. menu_text is the menu text OCR read."
                 ),
                 "inputSchema": object(json!({
                     "args": { "type": "array", "items": { "type": "string" }, "description": "Game arguments, e.g. one minecraft:// link" },
                     "env": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Extra environment for the launcher (Linux only)" },
                     "size": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 2, "maxItems": 2, "description": "[width, height] in logical pixels" },
+                    "headless": { "type": ["boolean", "string"], "description": "Linux: true or a size such as \"1280x720\" runs a game this call starts in a headless gamescope (default 1920x1080); false starts it on the desktop. Default: the BEDROCK_MCP_HEADLESS setting" },
                     "timeout_ms": { "type": "integer", "minimum": 0, "description": "Main-menu wait (default 300000)" },
                     "pid": { "type": "integer", "minimum": 1, "description": "The game process to attach to when several run" }
                 }), &[])
@@ -122,8 +124,8 @@ pub fn tools() -> Vec<Tool> {
                     "- world needs the WebSocket: with the Bridge pack, re_mcp:state (the player), re_mcp:world and nearby re_mcp:entities; without it, eye, yaw, pitch (bisected), dimension, nearby actors, time_of_day and game_time. Without the pack, in a world with the unstable layer's world_state capability, world.player adds the native player_get fields (source native), even without the WebSocket.\n",
                     "- On generic Linux desktops the window size is at scale 1 and workspace is null.\n",
                     "- input_lock is {enabled, locked, taken_over, banner, note}: while the server plays, the player's real keyboard and mouse are locked out of the game; taken_over is true once the player pressed F9 since the last lock started. BEDROCK_MCP_INPUT_LOCK=0 turns it off.\n\n",
-                    "Returns {running, pid, crash_debugger, agent, window, in_world: {value, source, notes}, content_log_errors, attention, warnings, websocket, world, camera, recording, timeline, held, input_lock, unstable}. ",
-                    "window.desktop is hyprland, generic or windows; unstable is null without the layer, else {capabilities, screens (scene stacks, bottom first), camera}."
+                    "Returns {running, pid, crash_debugger, agent, window, headless, in_world: {value, source, notes}, content_log_errors, attention, warnings, websocket, world, camera, recording, timeline, held, input_lock, unstable}. ",
+                    "window.desktop is hyprland, generic or windows; headless is {width, height} while the game runs inside gamescope (the user cannot see it), else null; unstable is null without the layer, else {capabilities, screens (scene stacks, bottom first), camera}."
                 ),
                 "inputSchema": object(json!({}), &[])
             }),

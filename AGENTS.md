@@ -37,8 +37,17 @@ cd mc/bridge && bun install && bun run typecheck   # same for mc/gametest
 - `docs/tools.md` must match the code; a test fails when it is stale. Regenerate it whenever a
   tool's name, description or schema changes.
 - Changes to `scripts/install.sh` or `install.ps1`: run `scripts/test-install.sh target/debug/bedrock-mcp`
-  (Linux) or `scripts/test-install.ps1` (Windows).
+  (Linux) or `scripts/test-install.ps1` (Windows). They serve a local copy of a release through
+  `scripts/release-server.py` and `BEDROCK_MCP_RELEASES`, and cover fresh installs, updates,
+  pinned tags and bad checksums. CI runs them on Linux and Windows.
 - `cargo fmt --all` before you finish.
+
+## Releasing
+
+Set `version` in the workspace `Cargo.toml`, then push a matching tag (`v0.2.0` for `0.2.0`). The
+Release workflow refuses a tag that does not match. It sets `BEDROCK_MCP_REQUIRE_PACKS=1`, so a
+build without the exported packs in `mc/*/build` fails instead of shipping without them. Asset
+names carry no version, so `releases/latest/download/` always points at the newest release.
 
 ## Writing tools
 

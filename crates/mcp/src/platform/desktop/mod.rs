@@ -1,5 +1,7 @@
 //! The Linux desktop backend, chosen once per process: Hyprland when the session runs inside
-//! Hyprland and `hyprctl` answers, otherwise the generic backend that needs no compositor.
+//! Hyprland and `hyprctl` answers, otherwise the generic backend that needs no compositor. A
+//! headless game runs in gamescope, out of the desktop's reach, so it always gets the generic
+//! backend, which takes the window from the agent.
 
 mod generic;
 mod hyprland;
@@ -16,9 +18,13 @@ const HYPRLAND_SIGNATURE: &str = "HYPRLAND_INSTANCE_SIGNATURE";
 
 /// The desktop backend for this session.
 pub fn current() -> &'static dyn Desktop {
-    static CHOSEN: LazyLock<&'static dyn Desktop> =
+    static COMPOSITOR: LazyLock<&'static dyn Desktop> =
         LazyLock::new(|| select(std::env::var_os(HYPRLAND_SIGNATURE), hyprland::answers));
-    *CHOSEN
+    if super::linux::headless_game().is_some() {
+        &Generic
+    } else {
+        *COMPOSITOR
+    }
 }
 
 /// The generic backend, for tests of callers on a desktop without window control.

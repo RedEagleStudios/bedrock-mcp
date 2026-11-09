@@ -51,6 +51,8 @@ pub struct LaunchArgs {
     #[serde(default)]
     env: BTreeMap<String, String>,
     size: Option<[u32; 2]>,
+    /// gamescope's headless mode: `true`, a size such as `"1280x720"`, or `false`.
+    headless: Option<Value>,
     timeout_ms: Option<u64>,
     pid: Option<u32>,
 }
@@ -170,7 +172,8 @@ impl Session {
             .timeout_ms
             .map_or(DEFAULT_LAUNCH_TIMEOUT, Duration::from_millis);
         self.install = self.install.select(args.pid)?;
-        self.launch_game(&args.args, &env, args.size, timeout)
+        let headless = platform::resolve_headless(args.headless.as_ref())?;
+        self.launch_game(&args.args, &env, args.size, headless, timeout)
     }
 
     /// Launch the game unless it runs, wait for the main menu, attach the agent.
@@ -179,6 +182,7 @@ impl Session {
         args: &[String],
         env: &[(String, String)],
         size: Option<[u32; 2]>,
+        headless: Option<(u32, u32)>,
         timeout: Duration,
     ) -> Result<Value> {
         let mut notes = Vec::new();
@@ -192,6 +196,14 @@ impl Session {
         if already_running {
             if !args.is_empty() || !env.is_empty() {
                 notes.push("Minecraft was already running, so args and env were not used; quit first, or use connect to restart it with a server link.".to_owned());
+            }
+            if headless.is_some() {
+                notes.push(
+                    "Minecraft was already running, so it stays where it runs: headless \
+                     applies only to a game this call starts. game_stop first to relaunch it \
+                     headless."
+                        .to_owned(),
+                );
             }
         } else {
             match game_files::options_path(&self.install.prefix) {
@@ -216,7 +228,7 @@ impl Session {
                 ));
             }
             let since = self.clock.wall() - Duration::from_secs(2);
-            if let Some(workspace) = &workspace
+            if let Some(workspace) = workspace.as_ref().filter(|_| headless.is_none())
                 && let Err(error) = platform::desktop().open_on_workspace(workspace)
             {
                 notes.push(format!(
@@ -225,7 +237,9 @@ impl Session {
             }
             // The game writes its main-menu marker files once the menu is up; OCR of the menu
             // can see it sooner.
-            self.install = self.install.launch(args, env, timeout, &*self.clock)?;
+            self.install = self
+                .install
+                .launch(args, env, headless, timeout, &*self.clock)?;
             let install = &self.install;
             let desktop = platform::desktop();
             // A window that opens on a hidden workspace renders about one frame a second, so
@@ -287,11 +301,31 @@ impl Session {
         let status = agent.status()?;
         self.agent = Some(agent);
         let pid = self.running_pid()?;
+        if already_running {
+            // An attached game may run in a gamescope this server did not start; its size is
+            // the window the agent reports.
+            let size = (
+                u32::try_from(status.width).unwrap_or(0),
+                u32::try_from(status.height).unwrap_or(0),
+            );
+            platform::set_headless_game(platform::runs_in_gamescope(pid).then_some(size));
+        }
+        let headless_now = platform::headless_game();
+        let size = match (size, headless_now) {
+            (Some(_), Some((width, height))) => {
+                notes.push(format!(
+                    "size was not applied: a headless game keeps its gamescope size \
+                     {width}x{height}; launch with headless: \"WIDTHxHEIGHT\" for another."
+                ));
+                None
+            }
+            (size, _) => size,
+        };
         let window = arrange_window(
             platform::desktop(),
             pid,
             size,
-            workspace.as_deref(),
+            workspace.as_deref().filter(|_| headless_now.is_none()),
             &status,
             &mut notes,
         );
@@ -317,6 +351,7 @@ impl Session {
             "already_running": already_running,
             "agent": status,
             "window": window,
+            "headless": headless_now.map(|(width, height)| json!({"width": width, "height": height})),
             "menu_text": menu_text,
             "websocket_port": port,
             "notes": notes,
@@ -335,6 +370,8 @@ impl Session {
             Some(local) => Some(self.start_local_server(local)?),
             None => None,
         };
+        // A headless game comes back headless, at its size.
+        let headless = platform::headless_game();
         let restarted = self.install.game_pid().is_some();
         if restarted {
             self.stop_game()?;
@@ -343,7 +380,8 @@ impl Session {
             .timeout_ms
             .map_or(DEFAULT_LAUNCH_TIMEOUT, Duration::from_millis);
         let link = connect_link(&host, port);
-        let launched = self.launch_game(std::slice::from_ref(&link), &[], None, timeout)?;
+        let launched =
+            self.launch_game(std::slice::from_ref(&link), &[], None, headless, timeout)?;
         Ok(json!({
             "address": args.address,
             "link": link,
