@@ -83,3 +83,6 @@ try {
   [Environment]::SetEnvironmentVariable('Path', $UserPath, 'User')
   Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 }
+# A failing check throws and never gets here. Without this, the exit code of the last native
+# command (one of the expected failures above) becomes the script's.
+exit 0
