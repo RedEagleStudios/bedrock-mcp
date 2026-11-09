@@ -1,7 +1,7 @@
 //! Offline helpers for add-on work that run without the game: Minecraft Creator Tools for
-//! pack checks and fixes, the Bedrock JSON schemas, and Molang evaluation. Each runs a
-//! JavaScript package through Node.js or Bun as a subprocess; packages are fetched once
-//! into this server's cache folder.
+//! pack checks and fixes, the Bedrock JSON schemas, and Molang evaluation. Creator Tools and
+//! Molang run a JavaScript package through Node.js or Bun as a subprocess; packages and the
+//! schemas are fetched once into this server's cache folder.
 
 pub mod mct;
 pub mod molang;
@@ -219,6 +219,39 @@ pub fn package_dir(cache: &Path, name: &str, version: &str) -> PathBuf {
         .join(name)
 }
 
+/// Download `url` to the file `to` with curl, stopping after `timeout`.
+pub fn download(url: &str, to: &Path, timeout: Duration) -> Result<()> {
+    let curl = which("curl").ok_or_else(|| {
+        Error::msg(format!(
+            "Downloading {url} needs curl on PATH; none was found."
+        ))
+    })?;
+    let args: Vec<OsString> = [
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--location",
+        "--max-time",
+        &timeout.as_secs().to_string(),
+        "--output",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .chain([to.as_os_str().to_owned(), OsString::from(url)])
+    .collect();
+    let cwd = to.parent().unwrap_or(Path::new("."));
+    let ran = run(&curl, &args, cwd, None, timeout + Duration::from_secs(10))
+        .map_err(|error| Error::msg(format!("Downloading {url} failed: {error}")))?;
+    if ran.code != Some(0) || !to.is_file() {
+        bail!(
+            "Downloading {url} with curl failed (exit {:?}): {}",
+            ran.code,
+            ran.stderr_tail()
+        );
+    }
+    Ok(())
+}
+
 /// The folder of npm package `name@version` in the cache, fetching it on first use.
 pub fn ensure_package(name: &str, version: &str) -> Result<PathBuf> {
     let cache = cache_dir()?;
@@ -267,49 +300,6 @@ pub fn ensure_package(name: &str, version: &str) -> Result<PathBuf> {
         Ok(dir)
     } else {
         bail!("{spec} was fetched but {} is missing.", dir.display())
-    }
-}
-
-/// The published versions of npm package `name`, oldest first.
-pub fn package_versions(name: &str) -> Result<Vec<String>> {
-    let (program, npm) = installer()?;
-    let scratch = Scratch::new("versions")?;
-    fs::write(scratch.path().join("package.json"), "{}\n")?;
-    let verb = if npm { "view" } else { "info" };
-    let args: Vec<OsString> = [verb, name, "versions", "--json"]
-        .into_iter()
-        .map(OsString::from)
-        .collect();
-    let ran = run(
-        &program,
-        &args,
-        scratch.path(),
-        None,
-        Duration::from_secs(60),
-    )?;
-    if ran.code != Some(0) {
-        bail!(
-            "Listing {name} versions failed (exit {:?}): {}",
-            ran.code,
-            ran.stderr_tail()
-        );
-    }
-    parse_versions(&ran.stdout).ok_or_else(|| {
-        Error::msg(format!(
-            "Unexpected version list for {name}: {}",
-            ran.stdout.trim()
-        ))
-    })
-}
-
-fn parse_versions(text: &str) -> Option<Vec<String>> {
-    match serde_json::from_str::<serde_json::Value>(text.trim()).ok()? {
-        serde_json::Value::Array(items) => items
-            .into_iter()
-            .map(|item| item.as_str().map(str::to_owned))
-            .collect(),
-        serde_json::Value::String(one) => Some(vec![one]),
-        _ => None,
     }
 }
 
@@ -431,17 +421,9 @@ mod tests {
             [OsString::from("add"), OsString::from("--no-save")]
         );
         assert_eq!(
-            package_dir(Path::new("/c"), "@minecraft/bedrock-schemas", "1.26.60"),
-            PathBuf::from(
-                "/c/packages/@minecraft+bedrock-schemas@1.26.60/node_modules/@minecraft/bedrock-schemas"
-            )
+            package_dir(Path::new("/c"), "@scope/name", "1.0.0"),
+            PathBuf::from("/c/packages/@scope+name@1.0.0/node_modules/@scope/name")
         );
-        assert_eq!(
-            parse_versions("[\"1.0.0\", \"1.1.0-beta.2\"]").unwrap(),
-            ["1.0.0", "1.1.0-beta.2"]
-        );
-        assert_eq!(parse_versions("\"2.0.0\"").unwrap(), ["2.0.0"]);
-        assert!(parse_versions("npm ERR!").is_none());
     }
 
     #[test]

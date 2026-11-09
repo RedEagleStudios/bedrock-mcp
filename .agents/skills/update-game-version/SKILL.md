@@ -88,8 +88,9 @@ Remove or replace any string that is gone. Labels come from the public `en_US.la
 - `mc/bridge` and `mc/gametest`: the `@minecraft/server` and `@minecraft/server-gametest`
   versions in `package.json` and `packs/BP/manifest.json`, and `min_engine_version`. Run
   `bun install` and `bun run typecheck` in both, then `rgl run build`.
-- `crates/mcp/src/docs/mct.rs` and `molang.rs` pin package versions; bump them only when the
-  new release needs it. Bedrock schemas are fetched per game version automatically.
+- `crates/mcp/src/docs/mct.rs` and `molang.rs` pin package versions, and `schemas.rs` pins the
+  rockide/schemas release (`PINNED`); bump each only when the new release needs it, such as a
+  new `format_version` the schemas must know.
 - Cite any new LeviLamina header in a code comment. README Credits changes only for a new project.
 
 ## 6. Check live

@@ -82,19 +82,22 @@ pub fn tools() -> Vec<Tool> {
         tool(
             Hints::READ.open_world(),
             "List Bedrock schemas",
-            |s, a| reply(schemas::list(s.install(), &arguments(a)?)?),
+            |_, a| reply(schemas::list(&arguments(a)?)?),
             json!({
                 "name": "schema_list",
                 "description": format!(
                     concat!(
                         "Use this to find which schema describes a pack file type or component before you write one.\n\n",
-                        "Lists the JSON file types that {package} describes; with query, only matching documents plus matching components.\n\n",
-                        "- The package version follows the installed game version (from MicrosoftGame.Config) when known, else the newest.\n",
-                        "- It is fetched once with npm or Bun into the cache; without npm it uses a cached version, or fails when none is cached.\n\n",
-                        "Returns {{source: \"schemas\", package_version, game_version, documents: [{{id, title, pack, file_match, component_count, description}}], ",
-                        "components?: [{{kind, component}}], notes}}; notes report a version mismatch or fallback."
+                        "Lists the pack file types that {repository} {pinned} describes; with query, only matching documents plus matching components. ",
+                        "The release's source archive is downloaded once with curl into the cache.\n\n",
+                        "- Components are the namespaced keys (minecraft:health) each type's newest format_version schema reaches.\n",
+                        "- Fails when curl is missing or the download fails and nothing is cached; the error names the URL.\n\n",
+                        "Returns {{source: \"rockide\", version, documents: [{{id, title, pack, file_match, format_versions, component_count, description}}], ",
+                        "components?: [{{kind, component}}], truncated?, notes}}: file_match globs are relative to the pack folder, ",
+                        "format_versions are the ones with their own schema, oldest first."
                     ),
-                    package = schemas::PACKAGE
+                    repository = schemas::REPOSITORY,
+                    pinned = schemas::PINNED
                 ),
                 "inputSchema": object(json!({ "query": { "type": "string", "description": "Text to find, ignoring case, in document ids, titles, descriptions and component names, e.g. health (default: every document)" } }), &[])
             }),
@@ -102,19 +105,23 @@ pub fn tools() -> Vec<Tool> {
         tool(
             Hints::READ.open_world(),
             "Get a Bedrock schema",
-            |s, a| reply(schemas::get(s.install(), &arguments(a)?)?),
+            |_, a| reply(schemas::get(&arguments(a)?)?),
             json!({
                 "name": "schema_get",
                 "description": concat!(
                     "Use this to read the exact fields a pack file or component takes.\n\n",
-                    "Reads one JSON schema from the package schema_list uses: give id, or kind with an optional component.\n\n",
-                    "- Fails when nothing matches or kind is ambiguous; the error says where to look.\n\n",
-                    "Returns {source: \"schemas\", id, schema, refs, component?, kind?, package_version, game_version, notes}; refs are schema ids to pass to further calls."
+                    "Reads one JSON schema from the release schema_list uses: give id, or kind with an optional component. ",
+                    "A file type's schema is the one for its newest format_version unless format_version picks another.\n\n",
+                    "- A component is the first property of that name the type's schema reaches through its $refs; when it is a $ref, the schema it points to.\n",
+                    "- Fails when nothing matches, kind is ambiguous or format_version is unknown; the error says where to look.\n\n",
+                    "Returns {source: \"rockide\", version, id, schema, refs, kind?, component?, format_version?, notes}: ",
+                    "id and refs are schema ids (a file, with #/pointer for a part of one) to pass back as id."
                 ),
                 "inputSchema": object(json!({
-                    "id": { "type": "string", "description": "A document id from schema_list (bp/entities) or a schema id from refs (bp/entities/entity_minecraft_health); not with kind" },
-                    "kind": { "type": "string", "description": "A document id, its folder (entities, particles) or its title; not with id" },
-                    "component": { "type": "string", "description": "A component of kind, with or without the minecraft: prefix (minecraft:health or health)" }
+                    "id": { "type": "string", "description": "A document id from schema_list (bp/entities) or a schema id from refs (bedrock/server/entity/legacy/components/health); not with kind" },
+                    "kind": { "type": "string", "description": "A document id, the same without its pack (entities, attachables), its title or its schema folder (server/entity); not with id" },
+                    "component": { "type": "string", "description": "A component of kind, with or without the minecraft: prefix (minecraft:health or health)" },
+                    "format_version": { "type": "string", "description": "The file's format_version, e.g. 1.21.0, with kind or a document id (default: the newest in format_versions)" }
                 }), &[])
             }),
         ),

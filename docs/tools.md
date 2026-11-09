@@ -1756,12 +1756,12 @@ Returns {source: "mct", dry_run, fix, updated_count, changed: [{file, changes: [
 
 Use this to find which schema describes a pack file type or component before you write one.
 
-Lists the JSON file types that @minecraft/bedrock-schemas describes; with query, only matching documents plus matching components.
+Lists the pack file types that rockide/schemas 0.1.4 describes; with query, only matching documents plus matching components. The release's source archive is downloaded once with curl into the cache.
 
-- The package version follows the installed game version (from MicrosoftGame.Config) when known, else the newest.
-- It is fetched once with npm or Bun into the cache; without npm it uses a cached version, or fails when none is cached.
+- Components are the namespaced keys (minecraft:health) each type's newest format_version schema reaches.
+- Fails when curl is missing or the download fails and nothing is cached; the error names the URL.
 
-Returns {source: "schemas", package_version, game_version, documents: [{id, title, pack, file_match, component_count, description}], components?: [{kind, component}], notes}; notes report a version mismatch or fallback.
+Returns {source: "rockide", version, documents: [{id, title, pack, file_match, format_versions, component_count, description}], components?: [{kind, component}], truncated?, notes}: file_match globs are relative to the pack folder, format_versions are the ones with their own schema, oldest first.
 
 | Argument | Type | Description |
 | --- | --- | --- |
@@ -1773,17 +1773,19 @@ Returns {source: "schemas", package_version, game_version, documents: [{id, titl
 
 Use this to read the exact fields a pack file or component takes.
 
-Reads one JSON schema from the package schema_list uses: give id, or kind with an optional component.
+Reads one JSON schema from the release schema_list uses: give id, or kind with an optional component. A file type's schema is the one for its newest format_version unless format_version picks another.
 
-- Fails when nothing matches or kind is ambiguous; the error says where to look.
+- A component is the first property of that name the type's schema reaches through its $refs; when it is a $ref, the schema it points to.
+- Fails when nothing matches, kind is ambiguous or format_version is unknown; the error says where to look.
 
-Returns {source: "schemas", id, schema, refs, component?, kind?, package_version, game_version, notes}; refs are schema ids to pass to further calls.
+Returns {source: "rockide", version, id, schema, refs, kind?, component?, format_version?, notes}: id and refs are schema ids (a file, with #/pointer for a part of one) to pass back as id.
 
 | Argument | Type | Description |
 | --- | --- | --- |
 | `component` | string | A component of kind, with or without the minecraft: prefix (minecraft:health or health) |
-| `id` | string | A document id from schema_list (bp/entities) or a schema id from refs (bp/entities/entity_minecraft_health); not with kind |
-| `kind` | string | A document id, its folder (entities, particles) or its title; not with id |
+| `format_version` | string | The file's format_version, e.g. 1.21.0, with kind or a document id (default: the newest in format_versions) |
+| `id` | string | A document id from schema_list (bp/entities) or a schema id from refs (bedrock/server/entity/legacy/components/health); not with kind |
+| `kind` | string | A document id, the same without its pack (entities, attachables), its title or its schema folder (server/entity); not with id |
 
 ### molang_eval
 

@@ -133,11 +133,6 @@ impl Session {
         self.world.clone().map_err(Error::Message)
     }
 
-    /// The game installation this session drives.
-    pub(crate) fn install(&self) -> &Install {
-        &self.install
-    }
-
     fn running_pid(&self) -> Result<u32> {
         self.install
             .game_pid()
