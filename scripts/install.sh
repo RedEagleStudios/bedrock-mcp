@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install or update Bedrock MCP for Minecraft by Red Eagle Studios on Linux x86_64:
+# Install or update Bedrock MCP for Minecraft on Linux x86_64:
 #
 #   curl -fsSL https://github.com/RedEagleStudios/bedrock-mcp/releases/latest/download/install.sh | sh
 #   curl -fsSL https://github.com/RedEagleStudios/bedrock-mcp/releases/latest/download/install.sh | sh -s -- v0.2.0

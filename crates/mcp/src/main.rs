@@ -1,4 +1,4 @@
-//! Bedrock MCP for Minecraft by Red Eagle Studios: a stdio MCP server for agentic AI add-on
+//! Bedrock MCP for Minecraft: a stdio MCP server for agentic AI add-on
 //! development and testing. It drives Minecraft Bedrock (the GDK build, natively on Windows or
 //! under Wine or Proton on Linux, started by any launcher) through an injected agent DLL for
 //! input and frame copies, Bedrock's WebSocket automation protocol for commands and events, the

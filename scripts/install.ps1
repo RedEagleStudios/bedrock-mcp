@@ -1,4 +1,4 @@
-# Install or update Bedrock MCP for Minecraft by Red Eagle Studios on Windows x86_64:
+# Install or update Bedrock MCP for Minecraft on Windows x86_64:
 #
 #   irm https://github.com/RedEagleStudios/bedrock-mcp/releases/latest/download/install.ps1 | iex
 #   & ([scriptblock]::Create((irm https://github.com/RedEagleStudios/bedrock-mcp/releases/latest/download/install.ps1))) v0.2.0

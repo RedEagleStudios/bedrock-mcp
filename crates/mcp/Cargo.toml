@@ -1,6 +1,7 @@
 [package]
 name = "bedrock-mcp"
-description = "Bedrock MCP for Minecraft by Red Eagle Studios: agentic AI add-on development and testing on Minecraft Bedrock, on Windows or on Linux under mcbe-gdk-linux"
+description = "Bedrock MCP for Minecraft: agentic AI add-on development and testing on Minecraft Bedrock, on Windows or on Linux under mcbe-gdk-linux"
+authors = ["Red Eagle Studios"]
 edition.workspace = true
 license.workspace = true
 version.workspace = true

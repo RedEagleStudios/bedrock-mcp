@@ -21,7 +21,7 @@ use crate::{
 
 pub const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const SERVER_NAME: &str = "bedrock-mcp";
-const SERVER_TITLE: &str = "Bedrock MCP for Minecraft by Red Eagle Studios";
+const SERVER_TITLE: &str = "Bedrock MCP for Minecraft";
 /// How to run a play test, for the client's model.
 const INSTRUCTIONS: &str = "\
 Testing an add-on in the game (prompts/list offers these flows ready to follow: playtest_item, \
