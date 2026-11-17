@@ -197,7 +197,7 @@ so it also works in CI. Download BDS from
 `~/.local/share/bedrock-server/current`, or `%LOCALAPPDATA%\bedrock-server\current` on Windows. To
 use another folder, set `BEDROCK_MCP_BDS` or pass the tool's `server` argument.
 
-Each call runs in a scratch server folder, so the BDS folder stays unchanged. It loads your packs
+Each server runs in its own scratch folder, so the BDS folder stays unchanged. It loads your packs
 in a flat world or a copy of a client world, turns on the Beta APIs experiment, runs `/gametest`
 and returns each test's result with the server log. A test builds its structure from
 `structures/<namespace>/<name>.mcstructure` in a behavior pack, or from a structure saved in the
@@ -214,10 +214,37 @@ module versions it does not know, and the reply's `errors` and `pack_stack` show
 `bds_check {packs}` loads packs on the same server without running tests and returns the errors
 and warnings they caused.
 
+### Parallel runs
+
+Both tools take `runs`, a list of runs that start at the same time, each on its own server with
+its own world, so they cannot affect each other. Use it to test several variants of a pack side by
+side; the reply returns one result per run with its `label`. A call without `runs` runs one server.
+
+`gametest_server` can also split one run's tests across servers with `shards: N` (default 1). It
+finds the tests by reading the behavior packs' scripts for `register("<class>", "<name>", ...)`
+calls and their `.tag(...)` and `.batch(...)` chains, which works on bundled and minified scripts
+too, because BDS has no command that lists tests. Tests of one batch stay on one server, and each
+shard runs its tests without a batch together, then each batch in turn, as `runset` does. Each test
+gets its own spot, spaced by the widest `.mcstructure` in the packs, so a structure saved only in
+the world must not be wider. When a name or tag is not a string literal, the run uses one server
+and says why.
+
+You choose the parallelism; the server only limits it. A server needs about 500 MB of memory, two
+cores and a few seconds to start, and one server already runs a batch's tests together, so shards
+pay off for a suite of many batches or slow tests, not for a small one. A call may ask for up to 32
+servers; it runs at most `capacity.max_servers` at once (free cores / 2 and free memory / 500 MB,
+at most 8) and the rest in waves, with a note. Every reply includes `capacity` to plan the next
+call.
+
+Each server gets its own scratch folder under `bds-scratch` and log under `bds-logs` in the agent
+folder, named by kind, process id and a counter, so several MCP servers can run tests at the same
+time. The scratch folder goes when the server stops; the newest 40 logs of each tool stay.
+
 ## Settings
 
 | Variable | Effect |
 | --- | --- |
+| `BEDROCK_MCP_BDS` | The Bedrock Dedicated Server folder for `gametest_server` and `bds_check`. Default `~/.local/share/bedrock-server/current`, or `%LOCALAPPDATA%\bedrock-server\current` on Windows. |
 | `BEDROCK_MCP_TOOLSETS` | Comma-separated toolsets to offer, such as `game,player,actions,docs`. Unset offers all. An unknown name stops the server with the valid ones. |
 | `BEDROCK_MCP_UNSTABLE` | `0` keeps the unstable layer from loading. |
 | `BEDROCK_MCP_INPUT_LOCK` | `0` turns off the [input lock](#input-lock). |

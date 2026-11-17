@@ -73,23 +73,40 @@ pub fn tools() -> Vec<Tool> {
             json!({
                 "name": "bds_check",
                 "description": concat!(
-                    "Use this to check that packs load cleanly without a game client, such as in CI or before adding them to a world.\n\n",
+                    "Use this to check that packs load cleanly without a game client, such as in CI, before adding them to a world, or to compare several pack variants at once.\n\n",
                     "Starts a Bedrock Dedicated Server (BDS) in a scratch folder with a fresh flat world that applies the packs, ",
-                    "collects the errors and warnings it prints while it loads them and runs their scripts, then stops it and removes the folder.\n\n",
-                    "- Waits for \"Server started.\", then until output is quiet for 2 s (at most 15 s); timeout_ms bounds the whole check.\n",
+                    "collects the errors and warnings it prints while it loads them and runs their scripts, then stops it and removes the folder. ",
+                    "runs checks several pack sets at once, each on its own server and world.\n\n",
+                    "- Waits for \"Server started.\", then until output is quiet for 2 s (at most 15 s); timeout_ms bounds each whole check.\n",
                     "- A given pack missing from the server's pack stack is an error with rule pack-not-loaded: BDS can trail the client, so packs needing a newer engine or Script API fail to load.\n",
+                    "- A server takes about 500 MB of memory, two cores and a few seconds to start; a call may hold 32 runs and runs at most capacity.max_servers ",
+                    "(free cores / 2, free memory / 500 MB, at most 8) at once, the rest in waves with a note.\n",
+                    "- Every server gets its own scratch folder and log under the agent folder, named by process id and a counter, so parallel calls never collide; the newest 40 logs stay.\n",
                     "- Default server: $BEDROCK_MCP_BDS, else ~/.local/share/bedrock-server/current (%LOCALAPPDATA%\\bedrock-server\\current on Windows); ",
                     "download from https://www.minecraft.net/en-us/download/server/bedrock.\n",
                     "- A server that does not start is a normal reply with started false and the log's last lines in notes.\n\n",
-                    "Returns {server {path, version}, started, timed_out, diagnostics, counts, pack_stack, log, elapsed_ms, notes}: ",
-                    "diagnostics are as game_reload gives them, with source bds; log is the server's output, kept after the check."
+                    "Returns {server {path, version}, started, timed_out, diagnostics, counts, pack_stack, log, elapsed_ms, capacity, notes}: ",
+                    "diagnostics are as game_reload gives them, with source bds; log is the server's output, kept after the check; ",
+                    "capacity {cores, free_cores, free_memory_mb, max_servers} helps plan the next call. ",
+                    "With runs it returns {server, runs, elapsed_ms, capacity, notes}, each run being that reply with its label, or {label, error}."
                 ),
                 "inputSchema": object(json!({
                     "packs": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Behavior and resource pack folders to load; each manifest says which kind" },
                     "server": { "type": "string", "description": "The BDS folder (default $BEDROCK_MCP_BDS, else the default server folder)" },
                     "beta_apis": { "type": "boolean", "description": "Turn on the Beta APIs experiment, for packs that use beta Script API modules (default false)" },
-                    "timeout_ms": { "type": "integer", "minimum": 1, "description": "Longest the whole check may take (default 120000)" }
-                }), &["packs"])
+                    "timeout_ms": { "type": "integer", "minimum": 1, "description": "Longest each whole check may take (default 120000)" },
+                    "runs": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 32,
+                        "items": object(json!({
+                            "label": { "type": "string", "description": "A name for the run, returned with its result" },
+                            "packs": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Behavior and resource pack folders to load; each manifest says which kind" },
+                            "beta_apis": { "type": "boolean", "description": "Turn on the Beta APIs experiment (default false)" }
+                        }), &["packs"]),
+                        "description": "Pack sets to check in parallel, each on its own server, instead of packs and beta_apis at the top level"
+                    }
+                }), &[])
             }),
         ),
         tool(

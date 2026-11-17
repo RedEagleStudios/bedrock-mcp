@@ -71,6 +71,17 @@ impl Tag {
     }
 }
 
+/// A bare root compound with no header, as in a `.mcstructure` file.
+pub fn parse_compound(data: &[u8]) -> Result<Compound> {
+    let mut reader = Reader { data, at: 0 };
+    let [id] = reader.take()?;
+    if id != 10 {
+        bail!("The NBT data does not start with a compound.");
+    }
+    reader.string()?;
+    reader.compound(0)
+}
+
 /// A parsed `level.dat`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LevelDat {

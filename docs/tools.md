@@ -1116,31 +1116,37 @@ Returns {source, notes, command, message, messages}: message is the game's answe
 
 **Run GameTests on a dedicated server** · acts (repeating it acts again)
 
-Use this to run the add-on's GameTests without a game client, such as in CI.
+Use this to run the add-on's GameTests without a game client, such as in CI, or to test several variants of a pack side by side.
 
-Runs the tests on a Bedrock Dedicated Server (BDS) in a scratch folder that links the server's files, and reports every result. The world is a copy of the client world named by world, with its packs, or a fresh flat world.
+Runs the tests on a Bedrock Dedicated Server (BDS) in a scratch folder that links the server's files, and reports every result. The world is a copy of the client world named by world, with its packs, or a fresh flat world. runs starts several runs at once, each with its own server and world, so they cannot affect each other.
 
 - Turns on Beta APIs, turns off mob spawning, daylight and weather, runs commands, then /gametest as gametest_run does.
-- Returns once every expected test has a result and output is quiet for 5 s, after idle_ms without progress, or at timeout_ms.
+- Returns once every expected test has a result and output is quiet for 5 s, after idle_ms without progress, or at timeout_ms; each run and shard has its own limits.
+- A server takes about 500 MB of memory, two cores and a few seconds to start. Parallel servers pay off for several pack variants, or with shards for a suite of many batches (one server runs batches one after another) or heavy tests; one server already runs a batch's tests together, so a small suite is fastest with shards 1.
+- shards reads the behavior packs' scripts for register calls with literal names and tags (bundled or minified too) and keeps tests of one batch on one server. Each shard starts its tests without a batch together, then each batch in turn, as runset does, each test by /gametest run in its own grid cell sized from the widest .mcstructure in the packs (a structure saved only in the world must fit it). Names it cannot read, a single test or until_fail run on one server instead, with a note.
+- You choose the parallelism; the server only limits it: a call may need at most 32 servers (the sum of its runs' shards), and runs at most capacity.max_servers at once (free cores / 2, free memory / 500 MB, at most 8), the rest in waves with a note.
+- Every server gets its own scratch folder and log under the agent folder, named by process id and a counter, so calls from several MCP servers never collide; the folder goes after the run, and the newest 40 logs stay.
 - Structures come from `structures/<namespace>/<name>.mcstructure` in a pack or the world; make one with `tickingarea add 0 0 0 15 0 15 gt`, `fill 0 -60 0 4 -56 4 air`, `structure save <namespace>:<name> 0 -60 0 4 -56 4 disk` (flat air starts at y -60).
 - Default server: ~/.local/share/bedrock-server/current (%LOCALAPPDATA%\bedrock-server\current on Windows); download from https://www.minecraft.net/en-us/download/server/bedrock.
 - BDS can trail the client: packs needing a newer engine or Script API fail to load (see errors and pack_stack).
 - No tests, stalls and failures are normal replies; notes say which.
 
-Returns {server, command, expected, passed, failed, results, timed_out, errors, pack_stack, command_replies, log, elapsed_ms, notes}: errors groups distinct ERROR lines, log is the full server output, timed_out also covers idle_ms.
+Returns {server, command, expected, passed, failed, results, timed_out, errors, pack_stack, command_replies, log, elapsed_ms, capacity, notes}, plus discovery (how the tests were found) when shards is above 1, and shards [{index, tests, duration_ms, log, errors, failure}] when they split the run: errors groups distinct ERROR lines, log is the server output (null when sharded), timed_out also covers idle_ms, a test its shard left without a result fails with errored true, and capacity {cores, free_cores, free_memory_mb, max_servers} helps plan the next call. With runs it returns {server, runs, elapsed_ms, capacity, notes}, each run being that reply with its label, or {label, error} when it could not start.
 
 | Argument | Type | Description |
 | --- | --- | --- |
 | `commands` | array of string | Console commands (no slash) to run before the tests; each reply is returned |
-| `idle_ms` | integer, at least 1 | Stop when no test makes progress for this long (default 120000) |
+| `idle_ms` | integer, at least 1 | Stop a run when no test makes progress for this long (default 120000) |
 | `packs` | array of string | Behavior and resource pack folders to load and apply to the world; each manifest says which kind |
 | `repeat` | integer, at least 1 | Runs of a single test |
 | `rotation` | integer, 0 to 3 | Quarter turns clockwise for the test structures |
+| `runs` | array of object {commands, label, packs, repeat, rotation, shards, stop_on_failure, tag, test, until_fail, world} | Runs to start in parallel, each with its own server and world, instead of the run options at the top level |
 | `server` | string | The BDS folder (default $BEDROCK_MCP_BDS, else the default server folder) |
+| `shards` | integer, 1 to 32 | Servers to split the tests across (default 1) |
 | `stop_on_failure` | boolean | Stop repeating a single test at its first failure |
 | `tag` | string | A test tag or class name |
 | `test` | string | A registered test id, <class>:<name> |
-| `timeout_ms` | integer, at least 1 | Longest the tests may run (default 900000) |
+| `timeout_ms` | integer, at least 1 | Longest each run's tests may run (default 900000) |
 | `until_fail` | boolean | With a tag: stop the set at the first failure |
 | `world` | string | A client world to copy, by name or folder id; without it the run makes a fresh flat world |
 
@@ -1584,23 +1590,26 @@ Returns {reloaded, world_back, synced: [{kind, name, uuid, source, installed, me
 
 **Check packs on a dedicated server** · reads only
 
-Use this to check that packs load cleanly without a game client, such as in CI or before adding them to a world.
+Use this to check that packs load cleanly without a game client, such as in CI, before adding them to a world, or to compare several pack variants at once.
 
-Starts a Bedrock Dedicated Server (BDS) in a scratch folder with a fresh flat world that applies the packs, collects the errors and warnings it prints while it loads them and runs their scripts, then stops it and removes the folder.
+Starts a Bedrock Dedicated Server (BDS) in a scratch folder with a fresh flat world that applies the packs, collects the errors and warnings it prints while it loads them and runs their scripts, then stops it and removes the folder. runs checks several pack sets at once, each on its own server and world.
 
-- Waits for "Server started.", then until output is quiet for 2 s (at most 15 s); timeout_ms bounds the whole check.
+- Waits for "Server started.", then until output is quiet for 2 s (at most 15 s); timeout_ms bounds each whole check.
 - A given pack missing from the server's pack stack is an error with rule pack-not-loaded: BDS can trail the client, so packs needing a newer engine or Script API fail to load.
+- A server takes about 500 MB of memory, two cores and a few seconds to start; a call may hold 32 runs and runs at most capacity.max_servers (free cores / 2, free memory / 500 MB, at most 8) at once, the rest in waves with a note.
+- Every server gets its own scratch folder and log under the agent folder, named by process id and a counter, so parallel calls never collide; the newest 40 logs stay.
 - Default server: $BEDROCK_MCP_BDS, else ~/.local/share/bedrock-server/current (%LOCALAPPDATA%\bedrock-server\current on Windows); download from https://www.minecraft.net/en-us/download/server/bedrock.
 - A server that does not start is a normal reply with started false and the log's last lines in notes.
 
-Returns {server {path, version}, started, timed_out, diagnostics, counts, pack_stack, log, elapsed_ms, notes}: diagnostics are as game_reload gives them, with source bds; log is the server's output, kept after the check.
+Returns {server {path, version}, started, timed_out, diagnostics, counts, pack_stack, log, elapsed_ms, capacity, notes}: diagnostics are as game_reload gives them, with source bds; log is the server's output, kept after the check; capacity {cores, free_cores, free_memory_mb, max_servers} helps plan the next call. With runs it returns {server, runs, elapsed_ms, capacity, notes}, each run being that reply with its label, or {label, error}.
 
 | Argument | Type | Description |
 | --- | --- | --- |
-| `packs` (required) | array of string | Behavior and resource pack folders to load; each manifest says which kind |
 | `beta_apis` | boolean | Turn on the Beta APIs experiment, for packs that use beta Script API modules (default false) |
+| `packs` | array of string | Behavior and resource pack folders to load; each manifest says which kind |
+| `runs` | array of object {beta_apis, label, packs} | Pack sets to check in parallel, each on its own server, instead of packs and beta_apis at the top level |
 | `server` | string | The BDS folder (default $BEDROCK_MCP_BDS, else the default server folder) |
-| `timeout_ms` | integer, at least 1 | Longest the whole check may take (default 120000) |
+| `timeout_ms` | integer, at least 1 | Longest each whole check may take (default 120000) |
 
 ### log_levels_set
 

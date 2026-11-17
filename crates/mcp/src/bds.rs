@@ -1,20 +1,35 @@
 //! GameTests on a Bedrock Dedicated Server (BDS) with no client: a scratch server folder that
 //! links the user's server files, a fresh or copied world with the Beta APIs experiment, and
 //! a console driver that runs `/gametest` and reads the results from the server's output.
+//! A call can hold several runs, and a run can split its tests across shards; every run and
+//! shard gets its own server, started in parallel up to what the machine can hold.
+
+mod dirs;
+mod discover;
+mod plan;
 
 use std::{
+    collections::VecDeque,
     env, fs,
     io::{self, BufRead, BufReader, BufWriter, Read, Write},
     net::UdpSocket,
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
-    sync::mpsc::{self, Receiver, RecvTimeoutError},
+    sync::{
+        Mutex,
+        mpsc::{self, Receiver, RecvTimeoutError},
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
 
+use self::dirs::RunDir;
+pub use self::{
+    dirs::{Kind as RunKind, RunDirs},
+    plan::Capacity,
+};
 use crate::{
     content_log,
     error::{Error, Result, bail},
@@ -60,6 +75,9 @@ const START_TIMEOUT: Duration = Duration::from_secs(180);
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Results are complete once every expected test has one and output stayed quiet this long.
 const SETTLE: Duration = Duration::from_secs(5);
+/// Between a shard's steps: long enough for a last result line, short enough to keep pace
+/// with `runset`, which starts the next batch at once.
+const STEP_SETTLE: Duration = Duration::from_secs(1);
 /// A command's reply: the lines that arrive until output is quiet this long.
 const REPLY_QUIET: Duration = Duration::from_millis(300);
 const REPLY_FIRST: Duration = Duration::from_secs(5);
@@ -78,16 +96,25 @@ const CHECK_AFTER_START: Duration = Duration::from_secs(15);
 pub const DEFAULT_TIMEOUT_MS: u64 = 900_000;
 pub const DEFAULT_IDLE_MS: u64 = 120_000;
 
-/// What a run uses.
-pub struct Options {
-    pub server: PathBuf,
-    /// The scratch folder, recreated by the run.
-    pub run_dir: PathBuf,
+/// One `gametest_server` run: a world with its packs and the tests to run in it.
+pub struct RunSpec {
+    pub label: Option<String>,
     pub packs: Vec<PathBuf>,
     /// A client world to copy, and the client's `com.mojang` folder its packs come from.
     pub world: Option<(WorldFolder, PathBuf)>,
     pub commands: Vec<String>,
     pub run: Run,
+    /// Servers to split the tests across; 1 runs them on one server.
+    pub shards: usize,
+}
+
+/// A `gametest_server` call.
+pub struct Options {
+    pub server: PathBuf,
+    pub dirs: RunDirs,
+    pub runs: Vec<RunSpec>,
+    /// The call used the single-run arguments, so the reply is that run's own.
+    pub single: bool,
     pub timeout: Duration,
     pub idle: Duration,
 }
@@ -124,34 +151,364 @@ pub fn development_dir(kind: Kind) -> &'static str {
     }
 }
 
-/// Run the tests and report; see the `gametest_server` tool for the reply.
+/// Run every run's tests, each run or shard on its own server, and report; see the
+/// `gametest_server` tool for the reply.
 pub fn run(options: &Options) -> Result<Value> {
     let began = Instant::now();
-    let command = gametest::run_command(&options.run)?;
-    if let Some(bad) = options
-        .commands
-        .iter()
-        .find(|line| line.contains(['\n', '\r']))
-    {
-        bail!("Console command {bad:?} spans several lines; give one command per entry.");
+    let capacity = Capacity::read();
+    for spec in &options.runs {
+        gametest::run_command(&spec.run)?;
+        if let Some(bad) = spec
+            .commands
+            .iter()
+            .find(|line| line.contains(['\n', '\r']))
+        {
+            bail!("Console command {bad:?} spans several lines; give one command per entry.");
+        }
+        if spec.shards == 0 {
+            bail!("shards must be at least 1.");
+        }
     }
-    let dir = &options.run_dir;
-    let log_path = dir.join("server.log");
+    let plans: Vec<RunPlan> = options.runs.iter().map(plan_run).collect();
+    let jobs: Vec<(usize, usize)> = plans
+        .iter()
+        .enumerate()
+        .flat_map(|(run, plan)| (0..plan.servers()).map(move |shard| (run, shard)))
+        .collect();
+    let mut notes = request_notes(jobs.len(), capacity)?;
+    let mut served: Vec<Vec<Option<Result<Served>>>> = plans
+        .iter()
+        .map(|plan| (0..plan.servers()).map(|_| None).collect())
+        .collect();
+    let finished = parallel(jobs, capacity.max_servers, |(run, shard)| {
+        let spec = &options.runs[run];
+        let tests = plans[run]
+            .shards
+            .as_ref()
+            .map(|sharded| (&sharded.plans[shard], sharded.cell));
+        let dir = options.dirs.next(RunKind::Gametest);
+        ((run, shard), serve(options, spec, tests, &dir))
+    });
+    for ((run, shard), result) in finished {
+        served[run][shard] = Some(result);
+    }
+    options.dirs.tidy(RunKind::Gametest);
+    let mut replies = Vec::new();
+    for ((spec, plan), shards) in options.runs.iter().zip(&plans).zip(served) {
+        let shards: Vec<Result<Served>> = shards
+            .into_iter()
+            .map(|result| result.expect("every job ran"))
+            .collect();
+        let reply = match &plan.shards {
+            Some(sharded) => Ok(sharded_reply(options, spec, plan, sharded, shards, began)),
+            None => {
+                let served = shards.into_iter().next().expect("one server");
+                served.map(|served| run_reply(options, spec, plan, &served, began))
+            }
+        };
+        replies.push(reply);
+    }
+    if options.single {
+        let mut reply = replies.pop().expect("one run")?;
+        reply["capacity"] = capacity.to_json();
+        if let Some(run_notes) = reply["notes"].as_array_mut() {
+            run_notes.extend(notes.into_iter().map(Value::String));
+        }
+        return Ok(reply);
+    }
+    let runs: Vec<Value> = options
+        .runs
+        .iter()
+        .zip(replies)
+        .map(|(spec, reply)| labeled(&spec.label, reply))
+        .collect();
+    notes.extend(failed_runs(&runs));
+    Ok(json!({
+        "server": { "path": options.server },
+        "runs": runs,
+        "elapsed_ms": began.elapsed().as_millis() as u64,
+        "capacity": capacity.to_json(),
+        "notes": notes,
+    }))
+}
+
+/// Refuse a call that asks for more servers than [`plan::MAX_REQUESTED`], and say when the
+/// servers run in waves.
+fn request_notes(servers: usize, capacity: Capacity) -> Result<Vec<String>> {
+    if servers > plan::MAX_REQUESTED {
+        bail!(
+            "The call asks for {servers} servers; one call may start at most {}, and this \
+             machine runs {} at a time. Split it into smaller calls or use fewer shards. \
+             capacity: {}",
+            plan::MAX_REQUESTED,
+            capacity.max_servers,
+            capacity.to_json()
+        );
+    }
+    Ok(if servers > capacity.max_servers {
+        vec![format!(
+            "The call needs {servers} servers but this machine runs at most {} at a time \
+             (capacity), so they ran in waves; later servers started when earlier ones stopped.",
+            capacity.max_servers
+        )]
+    } else {
+        Vec::new()
+    })
+}
+
+/// A run's reply with its label first, or its error.
+fn labeled(label: &Option<String>, reply: Result<Value>) -> Value {
+    let mut entry = json!({ "label": label });
+    match reply {
+        Ok(Value::Object(fields)) => {
+            if let Value::Object(entry) = &mut entry {
+                entry.extend(fields);
+            }
+        }
+        Ok(other) => entry["reply"] = other,
+        Err(error) => entry["error"] = json!(error.to_string()),
+    }
+    entry
+}
+
+fn failed_runs(runs: &[Value]) -> Vec<String> {
+    let failed = runs.iter().filter(|run| run.get("error").is_some()).count();
+    if failed == 0 {
+        return Vec::new();
+    }
+    vec![format!(
+        "{failed} of {} runs could not run; see their error.",
+        runs.len()
+    )]
+}
+
+/// Run `work` on every item, at most `limit` at a time, and return the results in item order.
+fn parallel<T: Send, R: Send>(items: Vec<T>, limit: usize, work: impl Fn(T) -> R + Sync) -> Vec<R> {
+    let workers = limit.clamp(1, items.len().max(1));
+    let count = items.len();
+    let queue = Mutex::new(items.into_iter().enumerate().collect::<VecDeque<_>>());
+    let results = Mutex::new((0..count).map(|_| None).collect::<Vec<Option<R>>>());
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let next = queue.lock().expect("queue").pop_front();
+                    let Some((index, item)) = next else {
+                        break;
+                    };
+                    let result = work(item);
+                    results.lock().expect("results")[index] = Some(result);
+                }
+            });
+        }
+    });
+    results
+        .into_inner()
+        .expect("results")
+        .into_iter()
+        .map(|result| result.expect("every item ran"))
+        .collect()
+}
+
+/// How a run uses its servers.
+struct RunPlan {
+    /// Set when the run's tests split across shards.
+    shards: Option<Sharded>,
+    /// How the tests were found, for a run that asked for shards.
+    discovery: Option<Value>,
+    notes: Vec<String>,
+}
+
+impl RunPlan {
+    fn servers(&self) -> usize {
+        self.shards
+            .as_ref()
+            .map_or(1, |sharded| sharded.tests.len())
+    }
+}
+
+struct Sharded {
+    /// The selected tests in registration order.
+    order: Vec<String>,
+    /// Each shard's test ids.
+    tests: Vec<Vec<String>>,
+    /// Each shard's steps.
+    plans: Vec<plan::ShardPlan>,
+    /// Blocks between neighbouring test structures.
+    cell: i32,
+}
+
+/// Find the run's tests and split them when it asks for shards; otherwise, or when the tests
+/// cannot all be known, one server runs the usual `/gametest` command.
+fn plan_run(spec: &RunSpec) -> RunPlan {
+    let whole = |discovery: Option<Value>, note: String| RunPlan {
+        shards: None,
+        discovery,
+        notes: vec![note],
+    };
+    if spec.shards <= 1 {
+        return RunPlan {
+            shards: None,
+            discovery: None,
+            notes: Vec::new(),
+        };
+    }
+    if spec.run.test.is_some() {
+        return whole(
+            None,
+            "shards splits a set of tests; a single test ran on one server.".into(),
+        );
+    }
+    if spec.run.until_fail {
+        return whole(
+            None,
+            "until_fail stops the set at its first failure, which needs one server, so shards \
+             was ignored."
+                .into(),
+        );
+    }
+    let packs = behavior_pack_folders(spec);
+    let found = discover::discover(&packs);
+    let tag = spec.run.tag.as_deref().unwrap_or("suite:all");
+    let selected: Vec<discover::Registered> = found
+        .tests
+        .iter()
+        .filter(|test| test.matches(tag))
+        .cloned()
+        .collect();
+    let mut discovery = json!({
+        "method": "static",
+        "files": found.files,
+        "registered": found.tests.len(),
+        "selected": selected.len(),
+        "unresolved": found.unresolved,
+    });
+    let unknown_tags = tag != "suite:all" && found.tests.iter().any(|test| test.unknown_chain);
+    if found.truncated || !found.unresolved.is_empty() || unknown_tags {
+        discovery["complete"] = json!(false);
+        return whole(
+            Some(discovery),
+            format!(
+                "The pack scripts register tests whose {} not string literals, so the full list \
+                 is unknown; the run used one server instead of {} shards.",
+                if unknown_tags {
+                    "tags are"
+                } else if found.truncated {
+                    "files exceed the scan's bounds or whose names are"
+                } else {
+                    "names are"
+                },
+                spec.shards
+            ),
+        );
+    }
+    discovery["complete"] = json!(true);
+    if selected.len() < 2 {
+        return whole(
+            Some(discovery),
+            format!(
+                "The pack scripts register {} matching test{}, so the run used one server.",
+                selected.len(),
+                if selected.len() == 1 { "" } else { "s" }
+            ),
+        );
+    }
+    let plans = plan::plan_shards(&selected, spec.shards);
+    let tests: Vec<Vec<String>> = plans.iter().map(plan::ShardPlan::tests).collect();
+    let mut notes = Vec::new();
+    if tests.len() < spec.shards {
+        notes.push(format!(
+            "{} shards were asked for but the tests form only {} groups (tests of one batch \
+             stay together), so {} servers ran.",
+            spec.shards,
+            tests.len(),
+            tests.len()
+        ));
+    }
+    RunPlan {
+        shards: Some(Sharded {
+            order: selected.into_iter().map(|test| test.id).collect(),
+            tests,
+            plans,
+            cell: plan::cell_size(&packs),
+        }),
+        discovery: Some(discovery),
+        notes,
+    }
+}
+
+/// The behavior pack folders a run loads: the given ones and those its copied world applies.
+fn behavior_pack_folders(spec: &RunSpec) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = user_packs(&spec.packs)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(kind, _, _)| *kind == Kind::Behavior)
+        .map(|(_, _, path)| path)
+        .collect();
+    if let Some((world, shared)) = &spec.world {
+        let kind = Kind::Behavior;
+        let own_dir = world.path.join(kind.world_dir());
+        let own = packs::packs_in(&own_dir, "world", kind);
+        let installed = packs::installed_packs(shared, kind);
+        for entry in packs::read_pack_list(&world.path.join(kind.world_list())).unwrap_or_default()
+        {
+            let matches = |pack: &&Pack| pack.uuid.eq_ignore_ascii_case(&entry.pack_id);
+            if let Some(pack) = own.iter().find(matches) {
+                folders.push(own_dir.join(&pack.folder));
+            } else if let Some(pack) = installed.iter().find(matches) {
+                folders.push(shared.join(&pack.location).join(&pack.folder));
+            }
+        }
+    }
+    folders
+}
+
+/// What one server printed and did.
+struct Served {
+    output: Output,
+    outcome: Outcome,
+    command: String,
+    command_replies: Vec<Value>,
+    notes: Vec<String>,
+    log: PathBuf,
+    started: Instant,
+    ended: Instant,
+}
+
+/// Start one server in `dir`, run the commands and the tests (all of the run's, or one shard's
+/// share placed on a grid of `cell` blocks), stop it and remove its scratch folder.
+fn serve(
+    options: &Options,
+    spec: &RunSpec,
+    shard: Option<(&plan::ShardPlan, i32)>,
+    dir: &RunDir,
+) -> Result<Served> {
+    let result = serve_in(options, spec, shard, dir);
+    let _ = fs::remove_dir_all(&dir.scratch);
+    result
+}
+
+fn serve_in(
+    options: &Options,
+    spec: &RunSpec,
+    shard: Option<(&plan::ShardPlan, i32)>,
+    dir: &RunDir,
+) -> Result<Served> {
+    let started = Instant::now();
     let Scratch {
         log,
         user: _,
-        mut notes,
+        notes,
     } = prepare_scratch(&ScratchSpec {
         server: &options.server,
-        dir,
-        log_path: &log_path,
-        packs: &options.packs,
-        world: options.world.as_ref(),
+        dir: &dir.scratch,
+        log_path: &dir.log,
+        packs: &spec.packs,
+        world: spec.world.as_ref(),
         beta_apis: true,
         timeout: START_TIMEOUT,
     })?;
-
-    let mut server = Server::start(dir, log)?;
+    let mut server = Server::start(&dir.scratch, log)?;
     if !server.wait_started(START_TIMEOUT) {
         let output = server.stop();
         bail!(
@@ -161,69 +518,167 @@ pub fn run(options: &Options) -> Result<Value> {
             } else {
                 "did not start"
             },
-            log_path.display(),
-            log_tail(&log_path)
+            dir.log.display(),
+            log_tail(&dir.log)
         );
     }
     for rule in GAMERULES {
         server.command(rule);
     }
-    let command_replies: Vec<Value> = options
+    let command_replies: Vec<Value> = spec
         .commands
         .iter()
         .map(|line| json!({ "command": line, "reply": server.command(line) }))
         .collect();
-    let outcome = server.run_tests(&command, single_test_runs(&options.run), options);
-    let output = server.stop();
-
-    let expected = match outcome {
-        Outcome::Answer(_) => 0,
-        _ => single_test_runs(&options.run)
-            .or(output.expected)
-            .unwrap_or(0),
+    let limits = Limits {
+        timeout: options.timeout,
+        idle: options.idle,
+        stop_on_failure: spec.run.stop_on_failure == Some(true),
+        settle: SETTLE,
     };
-    let results: Vec<Value> = output
-        .results
-        .iter()
-        .map(|result| json!({ "test": result.test, "passed": result.passed, "message": result.message }))
-        .collect();
-    let failed: Vec<Value> = output
-        .results
-        .iter()
-        .filter(|result| !result.passed)
-        .map(|result| json!({ "test": result.test, "message": result.message }))
-        .collect();
-    let passed = output.results.iter().filter(|result| result.passed).count();
-    let errors = content_log::summarize(
-        output
-            .problems
-            .iter()
-            .filter(|problem| problem.level == "ERROR")
-            .map(|problem| (problem.area.as_str(), "ERROR", problem.message.as_str())),
-    );
-    match &outcome {
-        Outcome::Done => {}
-        Outcome::Answer(message) => {
-            notes.push(format!("The server answered {command:?} with: {message}"))
+    let (command, outcome) = match shard {
+        Some((shard, cell)) => {
+            let steps = shard_commands(shard, cell, spec.run.rotation);
+            let tests_started = Instant::now();
+            let mut outcome = Outcome::Done;
+            let mut expected = 0;
+            for (index, step) in steps.iter().enumerate() {
+                expected += step.len();
+                let last = index + 1 == steps.len();
+                let step_limits = Limits {
+                    timeout: options.timeout.saturating_sub(tests_started.elapsed()),
+                    settle: if last { SETTLE } else { STEP_SETTLE },
+                    ..limits
+                };
+                outcome = server.run_tests(step, Expect::Tests(expected), &step_limits);
+                if !matches!(outcome, Outcome::Done) {
+                    break;
+                }
+            }
+            (
+                "gametest run <test> for each test of the shard, each structure in its own grid \
+                 cell; tests without a batch together, then each batch in turn"
+                    .to_owned(),
+                outcome,
+            )
         }
-        Outcome::Idle => notes.push(format!(
+        None => {
+            let command = gametest::run_command(&spec.run)?;
+            let expect = match single_test_runs(&spec.run) {
+                Some(runs) => Expect::Lines(runs),
+                None => Expect::FromServer,
+            };
+            let outcome = server.run_tests(std::slice::from_ref(&command), expect, &limits);
+            (command, outcome)
+        }
+    };
+    let output = server.stop();
+    Ok(Served {
+        output,
+        outcome,
+        command,
+        command_replies,
+        notes,
+        log: dir.log.clone(),
+        started,
+        ended: Instant::now(),
+    })
+}
+
+/// `/gametest run` places every test at the same spot next to the command's origin, so each
+/// test of a shard gets its own grid cell through `execute positioned`. One list per step.
+fn shard_commands(shard: &plan::ShardPlan, cell: i32, rotation: Option<u8>) -> Vec<Vec<String>> {
+    let rotation = rotation
+        .map(|turns| format!(" {turns}"))
+        .unwrap_or_default();
+    let mut cells = plan::grid(shard.steps.iter().map(Vec::len).sum(), cell).into_iter();
+    shard
+        .steps
+        .iter()
+        .map(|step| {
+            step.iter()
+                .zip(cells.by_ref())
+                .map(|(test, (x, z))| {
+                    format!("execute positioned ~{x} ~ ~{z} run gametest run {test}{rotation}")
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn outcome_note(outcome: &Outcome, command: &str, options: &Options) -> Option<String> {
+    match outcome {
+        Outcome::Done => None,
+        Outcome::Answer(message) => {
+            Some(format!("The server answered {command:?} with: {message}"))
+        }
+        Outcome::Idle => Some(format!(
             "No test made progress for {} ms, so the run stopped early (idle_ms).",
             options.idle.as_millis()
         )),
-        Outcome::Timeout => notes.push(format!(
+        Outcome::Timeout => Some(format!(
             "The tests did not finish within {} ms (timeout_ms).",
             options.timeout.as_millis()
         )),
-        Outcome::Exited => notes.push("The server exited during the run; see log.".into()),
+        Outcome::Exited => Some("The server exited during the run; see log.".into()),
     }
+}
+
+fn error_groups<'a>(problems: impl IntoIterator<Item = &'a Problem>) -> Vec<Value> {
+    content_log::summarize(
+        problems
+            .into_iter()
+            .filter(|problem| problem.level == "ERROR")
+            .map(|problem| (problem.area.as_str(), "ERROR", problem.message.as_str())),
+    )
+}
+
+fn result_json(result: &TestResult) -> Value {
+    json!({ "test": result.test, "passed": result.passed, "message": result.message })
+}
+
+fn failed_json(results: &[Value]) -> Vec<Value> {
+    results
+        .iter()
+        .filter(|result| result["passed"] == false)
+        .map(|result| json!({ "test": result["test"], "message": result["message"] }))
+        .collect()
+}
+
+fn empty_stack_note(pack_stack: &[String], spec: &RunSpec) -> Option<String> {
+    (pack_stack.iter().any(|line| line.ends_with("None")) && !spec.packs.is_empty()).then(|| {
+        "The pack stack is empty although packs were given: the server may be older than the \
+         packs' min_engine_version."
+            .into()
+    })
+}
+
+const NO_TESTS: &str = "No test ran. Check that the pack registers tests with that id or tag and \
+                        that the pack stack lists the pack; errors show why a pack did not load.";
+
+/// The reply for a run on one server.
+fn run_reply(
+    options: &Options,
+    spec: &RunSpec,
+    plan: &RunPlan,
+    served: &Served,
+    began: Instant,
+) -> Value {
+    let output = &served.output;
+    let mut notes = served.notes.clone();
+    notes.extend(plan.notes.iter().cloned());
+    let expected = match served.outcome {
+        Outcome::Answer(_) => 0,
+        _ => single_test_runs(&spec.run).or(output.expected).unwrap_or(0),
+    };
+    let results: Vec<Value> = output.results.iter().map(result_json).collect();
+    let failed = failed_json(&results);
+    let passed = output.results.iter().filter(|result| result.passed).count();
+    notes.extend(outcome_note(&served.outcome, &served.command, options));
     if expected == 0 {
-        notes.push(
-            "No test ran. Check that the pack registers tests with that id or tag and that the \
-             pack stack lists the pack; errors show why a pack did not load."
-                .into(),
-        );
+        notes.push(NO_TESTS.into());
     } else {
-        let got = match single_test_runs(&options.run) {
+        let got = match single_test_runs(&spec.run) {
             Some(_) => output.result_lines,
             None => output.results.len(),
         };
@@ -237,80 +692,291 @@ pub fn run(options: &Options) -> Result<Value> {
     if !failed.is_empty() {
         notes.push(format!("{} tests failed.", failed.len()));
     }
-    if output.pack_stack.iter().any(|line| line.ends_with("None")) && !options.packs.is_empty() {
-        notes.push(
-            "The pack stack is empty although packs were given: the server may be older than \
-             the packs' min_engine_version."
-                .into(),
-        );
-    }
+    notes.extend(empty_stack_note(&output.pack_stack, spec));
     if !output.exited_cleanly {
         notes.push("The server did not quit after stop and was killed.".into());
     }
-    Ok(json!({
+    let mut reply = json!({
         "server": { "path": options.server, "version": output.version },
-        "command": command,
+        "command": served.command,
         "expected": expected,
         "passed": passed,
         "failed": failed,
         "results": results,
-        "timed_out": matches!(outcome, Outcome::Idle | Outcome::Timeout),
-        "errors": errors,
+        "timed_out": matches!(served.outcome, Outcome::Idle | Outcome::Timeout),
+        "errors": error_groups(&output.problems),
         "pack_stack": output.pack_stack,
-        "command_replies": command_replies,
-        "log": log_path,
+        "command_replies": served.command_replies,
+        "log": served.log,
+        "elapsed_ms": served.ended.duration_since(began).as_millis() as u64,
+        "notes": notes,
+    });
+    if let Some(discovery) = &plan.discovery {
+        reply["discovery"] = discovery.clone();
+    }
+    reply
+}
+
+/// Why a shard left tests without a result, if it did.
+fn shard_failure(served: &Result<Served>, options: &Options) -> Option<String> {
+    match served {
+        Err(error) => Some(error.to_string()),
+        Ok(served) => outcome_note(&served.outcome, &served.command, options),
+    }
+}
+
+/// One shard's share and what came of it.
+struct ShardResults<'a> {
+    tests: &'a [String],
+    results: &'a [TestResult],
+    failure: Option<&'a str>,
+}
+
+/// Every test's result in `order`, from the shard that ran it; a test its shard left without
+/// a result fails with the shard's reason and `errored: true`. Results for tests outside the
+/// plan come last.
+fn merge_results(order: &[String], shards: &[ShardResults]) -> Vec<Value> {
+    let mut merged = Vec::new();
+    for test in order {
+        let Some((index, shard)) = shards
+            .iter()
+            .enumerate()
+            .find(|(_, shard)| shard.tests.contains(test))
+        else {
+            continue;
+        };
+        match shard.results.iter().find(|result| &result.test == test) {
+            Some(result) => merged.push(result_json(result)),
+            None => merged.push(json!({
+                "test": test,
+                "passed": false,
+                "message": format!(
+                    "No result from shard {}: {}",
+                    index + 1,
+                    shard.failure.unwrap_or("the server reported none for this test")
+                ),
+                "errored": true,
+            })),
+        }
+    }
+    for shard in shards {
+        for result in shard.results {
+            if !order.contains(&result.test) {
+                merged.push(result_json(result));
+            }
+        }
+    }
+    merged
+}
+
+/// The reply for a run split across shards, in the one-server shape plus `shards`.
+fn sharded_reply(
+    options: &Options,
+    spec: &RunSpec,
+    plan: &RunPlan,
+    sharded: &Sharded,
+    shards: Vec<Result<Served>>,
+    began: Instant,
+) -> Value {
+    let failures: Vec<Option<String>> = shards
+        .iter()
+        .map(|served| shard_failure(served, options))
+        .collect();
+    let shard_results: Vec<ShardResults> = shards
+        .iter()
+        .zip(&sharded.tests)
+        .zip(&failures)
+        .map(|((served, tests), failure)| ShardResults {
+            tests,
+            results: served
+                .as_ref()
+                .map_or(&[][..], |served| &served.output.results),
+            failure: failure.as_deref(),
+        })
+        .collect();
+    let results = merge_results(&sharded.order, &shard_results);
+    let failed = failed_json(&results);
+    let passed = results
+        .iter()
+        .filter(|result| result["passed"] == true)
+        .count();
+    let ok: Vec<&Served> = shards
+        .iter()
+        .filter_map(|served| served.as_ref().ok())
+        .collect();
+    let first = ok.first();
+    let mut notes = plan.notes.clone();
+    if let Some(served) = first {
+        notes.extend(served.notes.iter().cloned());
+    }
+    let missing = results
+        .iter()
+        .filter(|result| result["errored"] == true)
+        .count();
+    if missing > 0 {
+        notes.push(format!(
+            "{missing} of {} tests have no result; see their message and shards.",
+            sharded.order.len()
+        ));
+    }
+    if !failed.is_empty() {
+        notes.push(format!("{} tests failed.", failed.len()));
+    }
+    if let Some(served) = first {
+        notes.extend(empty_stack_note(&served.output.pack_stack, spec));
+    }
+    if ok.iter().any(|served| !served.output.exited_cleanly) {
+        notes.push("A shard's server did not quit after stop and was killed.".into());
+    }
+    let shard_list: Vec<Value> = shards
+        .iter()
+        .zip(&sharded.tests)
+        .zip(&failures)
+        .enumerate()
+        .map(|(index, ((served, tests), failure))| {
+            let (duration, log, errors) = match served {
+                Ok(served) => (
+                    Some(served.ended.duration_since(served.started).as_millis() as u64),
+                    Some(served.log.clone()),
+                    served
+                        .output
+                        .problems
+                        .iter()
+                        .filter(|problem| problem.level == "ERROR")
+                        .count(),
+                ),
+                Err(_) => (None, None, 0),
+            };
+            json!({
+                "index": index + 1,
+                "tests": tests,
+                "duration_ms": duration,
+                "log": log,
+                "errors": errors,
+                "failure": failure,
+            })
+        })
+        .collect();
+    let ended = ok.iter().map(|served| served.ended).max().unwrap_or(began);
+    json!({
+        "server": {
+            "path": options.server,
+            "version": first.and_then(|served| served.output.version.clone()),
+        },
+        "command": first.map_or_else(String::new, |served| served.command.clone()),
+        "expected": sharded.order.len(),
+        "passed": passed,
+        "failed": failed,
+        "results": results,
+        "timed_out": ok.iter().any(|served| matches!(served.outcome, Outcome::Idle | Outcome::Timeout)),
+        "errors": error_groups(ok.iter().flat_map(|served| &served.output.problems)),
+        "pack_stack": first.map_or(&[][..], |served| &served.output.pack_stack),
+        "command_replies": first.map_or(&[][..], |served| &served.command_replies),
+        "log": Value::Null,
+        "elapsed_ms": ended.duration_since(began).as_millis() as u64,
+        "notes": notes,
+        "discovery": plan.discovery,
+        "shards": shard_list,
+    })
+}
+
+/// One `bds_check` run: packs to load in a fresh flat world.
+pub struct CheckSpec {
+    pub label: Option<String>,
+    pub packs: Vec<PathBuf>,
+    pub beta_apis: bool,
+}
+
+/// A `bds_check` call.
+pub struct CheckOptions {
+    pub server: PathBuf,
+    pub dirs: RunDirs,
+    pub runs: Vec<CheckSpec>,
+    /// The call used the single-run arguments, so the reply is that run's own.
+    pub single: bool,
+    /// Each check: world creation, start and the quiet wait.
+    pub timeout: Duration,
+}
+
+/// Check every run's packs, each on its own server started in parallel; see the `bds_check`
+/// tool for the reply.
+pub fn check(options: &CheckOptions) -> Result<Value> {
+    let began = Instant::now();
+    let capacity = Capacity::read();
+    if options.runs.iter().any(|spec| spec.packs.is_empty()) {
+        bail!("Give at least one pack folder to check in every run.");
+    }
+    let mut notes = request_notes(options.runs.len(), capacity)?;
+    let mut replies = parallel(
+        options.runs.iter().collect(),
+        capacity.max_servers,
+        |spec| {
+            let started = Instant::now();
+            let dir = options.dirs.next(RunKind::Check);
+            let prepared = prepare_scratch(&ScratchSpec {
+                server: &options.server,
+                dir: &dir.scratch,
+                log_path: &dir.log,
+                packs: &spec.packs,
+                world: None,
+                beta_apis: spec.beta_apis,
+                timeout: options.timeout,
+            });
+            let job = CheckJob {
+                server: &options.server,
+                dir: &dir,
+                timeout: options.timeout,
+            };
+            let result = prepared.and_then(|scratch| check_loaded(&job, scratch, started));
+            let _ = fs::remove_dir_all(&dir.scratch);
+            result
+        },
+    );
+    options.dirs.tidy(RunKind::Check);
+    if options.single {
+        let mut reply = replies.pop().expect("one run")?;
+        reply["capacity"] = capacity.to_json();
+        if let Some(run_notes) = reply["notes"].as_array_mut() {
+            run_notes.extend(notes.into_iter().map(Value::String));
+        }
+        return Ok(reply);
+    }
+    let runs: Vec<Value> = options
+        .runs
+        .iter()
+        .zip(replies)
+        .map(|(spec, reply)| labeled(&spec.label, reply))
+        .collect();
+    notes.extend(failed_runs(&runs));
+    Ok(json!({
+        "server": { "path": options.server },
+        "runs": runs,
         "elapsed_ms": began.elapsed().as_millis() as u64,
+        "capacity": capacity.to_json(),
         "notes": notes,
     }))
 }
 
-/// What a load check uses.
-pub struct CheckOptions {
-    pub server: PathBuf,
-    /// The scratch folder, recreated by the check and removed after it.
-    pub run_dir: PathBuf,
-    /// Where the server's output goes; it outlives the scratch folder.
-    pub log_path: PathBuf,
-    pub packs: Vec<PathBuf>,
-    pub beta_apis: bool,
-    /// The whole check: world creation, start and the quiet wait.
-    pub timeout: Duration,
+/// One load check's server.
+struct CheckJob<'a> {
+    server: &'a Path,
+    dir: &'a RunDir,
+    timeout: Duration,
 }
 
-/// Start a server with the packs in a fresh flat world, collect what it reports while it
-/// loads them, stop it and remove the scratch folder; see the `bds_check` tool for the reply.
-pub fn check(options: &CheckOptions) -> Result<Value> {
-    let began = Instant::now();
-    if options.packs.is_empty() {
-        bail!("Give at least one pack folder to check.");
-    }
-    let prepared = prepare_scratch(&ScratchSpec {
-        server: &options.server,
-        dir: &options.run_dir,
-        log_path: &options.log_path,
-        packs: &options.packs,
-        world: None,
-        beta_apis: options.beta_apis,
-        timeout: options.timeout,
-    });
-    let result = prepared.and_then(|scratch| check_loaded(options, scratch, began));
-    let _ = fs::remove_dir_all(&options.run_dir);
-    result
-}
-
-fn check_loaded(options: &CheckOptions, scratch: Scratch, began: Instant) -> Result<Value> {
+fn check_loaded(job: &CheckJob, scratch: Scratch, began: Instant) -> Result<Value> {
     let Scratch {
         log,
         user,
         mut notes,
     } = scratch;
-    let mut server = Server::start(&options.run_dir, log)?;
-    let remaining = options.timeout.saturating_sub(began.elapsed());
+    let mut server = Server::start(&job.dir.scratch, log)?;
+    let remaining = job.timeout.saturating_sub(began.elapsed());
     let started = server.wait_started(remaining);
     let timed_out = if started {
         !server.wait_quiet(
             CHECK_QUIET,
-            CHECK_AFTER_START.min(options.timeout.saturating_sub(began.elapsed())),
+            CHECK_AFTER_START.min(job.timeout.saturating_sub(began.elapsed())),
         )
     } else {
         !server.output.exited
@@ -324,7 +990,7 @@ fn check_loaded(options: &CheckOptions, scratch: Scratch, began: Instant) -> Res
             } else {
                 "exited"
             },
-            log_tail(&options.log_path)
+            log_tail(&job.dir.log)
         ));
     } else if timed_out {
         notes.push(format!(
@@ -358,13 +1024,13 @@ fn check_loaded(options: &CheckOptions, scratch: Scratch, began: Instant) -> Res
         diagnostics.extend(unloaded_packs(&roots, &user, &output.pack_stack));
     }
     Ok(json!({
-        "server": { "path": options.server, "version": output.version },
+        "server": { "path": job.server, "version": output.version },
         "started": started,
         "timed_out": timed_out,
         "diagnostics": diagnostics,
         "counts": log_diagnostics::counts(&diagnostics),
         "pack_stack": output.pack_stack,
-        "log": options.log_path,
+        "log": job.dir.log,
         "elapsed_ms": began.elapsed().as_millis() as u64,
         "notes": notes,
     }))
@@ -901,6 +1567,26 @@ enum Outcome {
     Exited,
 }
 
+/// When a run's results are complete.
+#[derive(Clone, Copy)]
+enum Expect {
+    /// `gametest run` of one test: this many result lines, one per repeat.
+    Lines(usize),
+    /// One `gametest run` per test: a result for this many distinct tests.
+    Tests(usize),
+    /// `runset`: as many tests as the server says it runs.
+    FromServer,
+}
+
+/// How long tests may take, and whether a repeated test stops at its first failure.
+struct Limits {
+    timeout: Duration,
+    idle: Duration,
+    stop_on_failure: bool,
+    /// How long output must stay quiet after the last result.
+    settle: Duration,
+}
+
 /// A running server: its console input and its output lines.
 struct Server {
     child: Child,
@@ -1040,16 +1726,15 @@ impl Server {
         reply
     }
 
-    fn run_tests(
-        &mut self,
-        command: &str,
-        single_runs: Option<usize>,
-        options: &Options,
-    ) -> Outcome {
+    /// Send the gametest commands and read until the results are complete, the tests stall or
+    /// the time is up.
+    fn run_tests(&mut self, commands: &[String], expect: Expect, limits: &Limits) -> Outcome {
         let problems_before = self.output.problems.len();
-        self.send(command);
+        for command in commands {
+            self.send(command);
+        }
         let sent = Instant::now();
-        let deadline = sent + options.timeout;
+        let deadline = sent + limits.timeout;
         let mut progress = sent;
         let mut seen = (self.output.activity, self.output.result_lines);
         loop {
@@ -1063,7 +1748,11 @@ impl Server {
             }
             let results_changed = self.output.result_lines != seen.1;
             seen = (self.output.activity, self.output.result_lines);
-            if self.output.activity == 0 && now - sent <= ANSWER_WINDOW + TICK {
+            // With one command per test, an error answers only one of them.
+            if !matches!(expect, Expect::Tests(_))
+                && self.output.activity == 0
+                && now - sent <= ANSWER_WINDOW + TICK
+            {
                 self.output.flush();
                 if let Some(problem) = self.output.problems[problems_before..]
                     .iter()
@@ -1072,18 +1761,21 @@ impl Server {
                     return Outcome::Answer(problem.message.clone());
                 }
             }
-            let expected = single_runs.or(self.output.expected);
-            let finished = expected.is_some_and(|expected| match single_runs {
-                Some(_) => self.output.result_lines >= expected,
-                None => self.output.results.len() >= expected,
-            });
-            let stopped = single_runs.is_some()
-                && options.run.stop_on_failure == Some(true)
+            let finished = match expect {
+                Expect::Lines(runs) => self.output.result_lines >= runs,
+                Expect::Tests(tests) => self.output.results.len() >= tests,
+                Expect::FromServer => self
+                    .output
+                    .expected
+                    .is_some_and(|expected| self.output.results.len() >= expected),
+            };
+            let stopped = matches!(expect, Expect::Lines(_))
+                && limits.stop_on_failure
                 && self.output.results.iter().any(|result| !result.passed);
-            if (finished || stopped) && !results_changed && now - progress >= SETTLE {
+            if (finished || stopped) && !results_changed && now - progress >= limits.settle {
                 return Outcome::Done;
             }
-            if now - progress >= options.idle {
+            if now - progress >= limits.idle {
                 return Outcome::Idle;
             }
             if now >= deadline {
@@ -1186,6 +1878,93 @@ mod tests {
             ]
         );
         assert_eq!(output.pack_stack.len(), 1);
+    }
+
+    #[test]
+    fn shard_results_merge_in_registration_order() {
+        let ids = |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
+        let result = |test: &str, passed: bool| TestResult {
+            test: test.into(),
+            passed,
+            message: if passed {
+                String::new()
+            } else {
+                "on purpose".into()
+            },
+        };
+        let order = ids(&["demo:a", "demo:b", "demo:c", "demo:d"]);
+        let first = ids(&["demo:a", "demo:c"]);
+        let second = ids(&["demo:b", "demo:d"]);
+        let first_results = [result("demo:c", false), result("demo:a", true)];
+        let second_results = [result("demo:b", true), result("demo:extra", true)];
+        let merged = merge_results(
+            &order,
+            &[
+                ShardResults {
+                    tests: &first,
+                    results: &first_results,
+                    failure: None,
+                },
+                ShardResults {
+                    tests: &second,
+                    results: &second_results,
+                    failure: Some("The tests did not finish within 10 ms (timeout_ms)."),
+                },
+            ],
+        );
+        let tests: Vec<&str> = merged.iter().map(|r| r["test"].as_str().unwrap()).collect();
+        assert_eq!(
+            tests,
+            ["demo:a", "demo:b", "demo:c", "demo:d", "demo:extra"]
+        );
+        assert_eq!(merged[2]["passed"], false);
+        assert_eq!(merged[3]["errored"], true);
+        assert!(
+            merged[3]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("No result from shard 2: The tests did not finish")
+        );
+        assert_eq!(failed_json(&merged).len(), 2);
+    }
+
+    #[test]
+    fn requests_beyond_capacity_run_in_waves_or_are_refused() {
+        let capacity = Capacity::from_parts(8, None, Some(16_000));
+        assert_eq!(capacity.max_servers, 4);
+        assert!(request_notes(4, capacity).unwrap().is_empty());
+        assert!(request_notes(6, capacity).unwrap()[0].contains("waves"));
+        let refused = request_notes(plan::MAX_REQUESTED + 1, capacity).unwrap_err();
+        assert!(refused.to_string().contains("max_servers"));
+    }
+
+    #[test]
+    fn shard_commands_place_tests_on_a_grid() {
+        let shard = plan::ShardPlan {
+            steps: vec![
+                vec!["demo:a".to_owned(), "demo:b".to_owned()],
+                vec!["demo:n".to_owned()],
+            ],
+        };
+        assert_eq!(
+            shard_commands(&shard, 24, Some(1)),
+            [
+                vec![
+                    "execute positioned ~0 ~ ~0 run gametest run demo:a 1",
+                    "execute positioned ~24 ~ ~0 run gametest run demo:b 1",
+                ],
+                vec!["execute positioned ~0 ~ ~24 run gametest run demo:n 1"],
+            ]
+        );
+    }
+
+    #[test]
+    fn parallel_keeps_item_order() {
+        let doubled = parallel((1..=9).collect(), 3, |n: u64| {
+            thread::sleep(Duration::from_millis(10 - n));
+            n * 2
+        });
+        assert_eq!(doubled, (1..=9).map(|n| n * 2).collect::<Vec<_>>());
     }
 
     #[test]
