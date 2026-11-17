@@ -61,10 +61,11 @@ macro_rules! combat_setup {
             "\
 1. game_launch {} (it only attaches when the game already runs).
 2. world_open {name: \"{{world}}\"}, then automation_connect {}. When its reply shows bridge: \
-false, the test still runs in single player on native reads and vanilla commands, but approach \
-and the inventory and block reads need the Bridge pack. Never install or add the pack yourself: \
-tell the user what it would add and ask. Only when they agree, run packs_install {}, then \
-world_leave {}, world_packs_set for \"{{world}}\", and world_open again.
+false, read its notes and decide for this test. An item play test usually checks the held \
+item, the hits and the kill causes, and the Bridge pack makes those exact, so offer it to the \
+user, saying what it adds; never install or add it yourself. Only when they agree, run \
+packs_install {}, then world_leave {}, world_packs_set for \"{{world}}\", and world_open again. \
+When they decline, go on with native reads and say in the report what could not be confirmed.
 3. scene_reset {spot: \"{{spot}}\", clear_entities: true, time: \"noon\", weather: \"clear\", \
 difficulty: \"normal\", gamemode: \"survival\", clear_inventory: true, give: [{item: \"{{item}}\", \
 slot: 0}], heal: true, hotbar: 0, perspective: \"",

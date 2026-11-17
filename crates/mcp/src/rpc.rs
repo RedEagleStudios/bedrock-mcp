@@ -34,11 +34,12 @@ wants their screen free or is not watching, and a normal launch when they want t
 along. headless in its reply says which one runs.
 The Bridge pack is the user's choice. Never install it or add it to a world on your own: no \
 packs_install without check: true, no world_packs_set for it, unless the user asked. Without it, \
-single-player tests still run on native reads and vanilla commands (cheats on). Suggest it to \
-the user, saying what it adds, when a reply says a tool needs it (inventory, items, blocks, \
-raycasts, containers, approach) or when the test is in multiplayer, where native reads do not \
-work. When the user agrees: packs_install, then world_packs_set while out of the world, then \
-reopen it.
+single-player tests still run on native reads and vanilla commands (cheats on). Decide case by \
+case: when automation_connect shows bridge: false, its notes list what the pack adds; if the \
+test you are about to run depends on any of it (inventory, items, blocks, raycasts, containers, \
+approach, script events, exact timing, multiplayer, quiet aim), stop and offer the pack, saying \
+what it would add for this test. If it does not, go on without asking. When the user agrees: \
+packs_install, then world_packs_set while out of the world, then reopen it.
 2. Held items need a warm-up after a world loads, or their attachable can stay frozen \
 (player_render_get shows it): scene_reset ends with one (warm_up, default true), and \
 action_sequence runs one before a recording or its first run in a newly loaded world (warm_up \

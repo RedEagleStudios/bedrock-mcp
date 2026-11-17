@@ -167,8 +167,11 @@ them as slash commands. [docs/tools.md](docs/tools.md#prompts) lists their argum
 The server carries the Bridge and GameTest packs, so they always match it. `packs_install` writes
 them to the game's development behavior packs, and `packs_install {check: true}` reports whether
 each is missing, outdated or current. The agent never installs a pack or adds one to a world
-without asking you. `world_packs_set` is marked destructive, so clients that confirm such tools ask
-too.
+without asking you, and it asks case by case: when a world lacks the Bridge pack,
+`automation_connect` lists what the pack would add, and the agent offers it only when the test at
+hand depends on that (inventory, items, blocks, script events, exact timing, multiplayer, quiet
+aim). Otherwise it carries on without the pack. `world_packs_set` is marked destructive, so
+clients that confirm such tools ask too.
 
 The game finds new development packs only when it starts. Restart it once after the first install,
 then add the packs to a world. From then on, `/reload all` reloads every pack in the world,

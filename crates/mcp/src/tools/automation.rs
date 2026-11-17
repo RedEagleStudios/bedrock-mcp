@@ -33,7 +33,7 @@ pub fn tools() -> Vec<Tool> {
                     "It types /connect 127.0.0.1:<port> into chat while the player is in a world and waits for the game to connect.\n\n",
                     "- Does nothing when already connected.\n",
                     "- WebSocket events arrive only while connected, so connect before the events you want to observe.\n\n",
-                    "Returns {connected, url, connections, bridge}. bridge is whether the bedrock-mcp Bridge pack answers in this world."
+                    "Returns {connected, url, connections, bridge, notes}. bridge is whether the bedrock-mcp Bridge pack answers in this world; without it, notes list what still works and what needs the pack, so you can decide whether this test is worth offering the pack to the user."
                 ),
                 "inputSchema": object(json!({}), &[])
             }),
@@ -297,14 +297,28 @@ struct NamesArgs {
     names: Vec<String>,
 }
 
+/// What a world without the Bridge pack still does and what it loses, for the agent to weigh
+/// against the test at hand.
+const WITHOUT_BRIDGE: &str = "The Bridge pack is not active in this world. Without it, \
+    single-player tests run on native reads and vanilla commands (cheats on): player state, \
+    health, hits and kills, spawning, tags, scoreboards, world info and entity properties work. \
+    These need the pack: inventory_get, target_get, entity_components_get, block_inspect, \
+    raycast, container_get, item_inspect, approach, script events with their causes, at_tick \
+    timing, other players in multiplayer, and silent exact aim for fight (without it fight aims \
+    with /tp, which prints chat lines). Decide for this test: when it depends on any of these, \
+    stop and offer the pack to the user, saying what it adds and that it changes the world's \
+    pack list; when it does not, go on without asking.";
+
 fn connect(session: &mut Session) -> Result<Value> {
     let world = session.ensure_world()?;
     let socket = world.socket();
+    let bridge = world.bridge(true)?;
     Ok(json!({
         "connected": true,
         "url": format!("ws://127.0.0.1:{}", socket.port()),
         "connections": socket.connections(),
-        "bridge": world.bridge(true)?,
+        "bridge": bridge,
+        "notes": if bridge { Vec::new() } else { vec![WITHOUT_BRIDGE] },
     }))
 }
 

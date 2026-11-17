@@ -1159,7 +1159,7 @@ It connects Minecraft's WebSocket automation session to this server now, instead
 - Does nothing when already connected.
 - WebSocket events arrive only while connected, so connect before the events you want to observe.
 
-Returns {connected, url, connections, bridge}. bridge is whether the bedrock-mcp Bridge pack answers in this world.
+Returns {connected, url, connections, bridge, notes}. bridge is whether the bedrock-mcp Bridge pack answers in this world; without it, notes list what still works and what needs the pack, so you can decide whether this test is worth offering the pack to the user.
 
 No arguments.
 
